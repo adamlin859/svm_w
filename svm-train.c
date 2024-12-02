@@ -19,12 +19,14 @@ void exit_with_help()
 	"	2 -- one-class SVM\n"
 	"	3 -- epsilon-SVR	(regression)\n"
 	"	4 -- nu-SVR		(regression)\n"
+	"	5 -- w-SVM     (Transfer Learning SVM)\n"
 	"-t kernel_type : set type of kernel function (default 2)\n"
 	"	0 -- linear: u'*v\n"
 	"	1 -- polynomial: (gamma*u'*v + coef0)^degree\n"
 	"	2 -- radial basis function: exp(-gamma*|u-v|^2)\n"
 	"	3 -- sigmoid: tanh(gamma*u'*v + coef0)\n"
 	"	4 -- precomputed kernel (kernel values in training_set_file)\n"
+	"-f transfer_file : set the transfer file for w-SVM\n"
 	"-d degree : set degree in kernel function (default 3)\n"
 	"-g gamma : set gamma in kernel function (default 1/num_features)\n"
 	"-r coef0 : set coef0 in kernel function (default 0)\n"
@@ -48,7 +50,7 @@ void exit_input_error(int line_num)
 	exit(1);
 }
 
-void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name);
+void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name);
 void read_problem(const char *filename);
 void do_cross_validation();
 
@@ -84,17 +86,20 @@ int main(int argc, char **argv)
 {
 	char input_file_name[1024];
 	char model_file_name[1024];
+	char transfer_file_name[1024];
 	const char *error_msg;
 
-	parse_command_line(argc, argv, input_file_name, model_file_name);
+	parse_command_line(argc, argv, input_file_name, model_file_name, transfer_file_name);
 	read_problem(input_file_name);
 	error_msg = svm_check_parameter(&prob,&param);
+	
 
 	if(error_msg)
 	{
 		fprintf(stderr,"ERROR: %s\n",error_msg);
 		exit(1);
 	}
+	printf("here");
 
 	if(cross_validation)
 	{
@@ -158,7 +163,7 @@ void do_cross_validation()
 	free(target);
 }
 
-void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name)
+void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name)
 {
 	int i;
 	void (*print_func)(const char*) = NULL;	// default printing to stdout
@@ -180,6 +185,7 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	param.weight_label = NULL;
 	param.weight = NULL;
 	cross_validation = 0;
+	transfer_file_name[0] = '\0';
 
 	// parse options
 	for(i=1;i<argc;i++)
@@ -245,6 +251,9 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 				param.weight_label[param.nr_weight-1] = atoi(&argv[i-1][2]);
 				param.weight[param.nr_weight-1] = atof(argv[i]);
 				break;
+			case 'f':
+				strcpy(transfer_file_name, argv[i]);
+				break;
 			default:
 				fprintf(stderr,"Unknown option: -%c\n", argv[i-1][1]);
 				exit_with_help();
@@ -254,10 +263,13 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	svm_set_print_string_function(print_func);
 
 	// determine filenames
+	if ((param.svm_type == W_SVM) && (transfer_file_name[0] == '\0'))
+		exit_with_help();
 
 	if(i>=argc)
 		exit_with_help();
-
+	
+	
 	strcpy(input_file_name, argv[i]);
 
 	if(i<argc-1)

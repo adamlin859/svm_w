@@ -410,6 +410,9 @@ public:
 	void Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
 		   SolutionInfo* si, int shrinking);
+	void Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
+		   double *alpha_, double Cp, double Cn, double eps,
+		   SolutionInfo* si, int shrinking);
 protected:
 	int active_size;
 	schar *y;
@@ -506,6 +509,287 @@ void Solver::reconstruct_gradient()
 }
 
 void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
+		   double *alpha_, double Cp, double Cn, double eps,
+		   SolutionInfo* si, int shrinking)
+{
+	this->l = l;
+	this->Q = &Q;
+	QD=Q.get_QD();
+	clone(p, p_,l);
+	clone(y, y_,l);
+	clone(alpha,alpha_,l);
+	this->Cp = Cp;
+	this->Cn = Cn;
+	this->eps = eps;
+	unshrink = false;
+
+	// initialize alpha_status
+	{
+		alpha_status = new char[l];
+		for(int i=0;i<l;i++)
+			update_alpha_status(i);
+	}
+
+	// initialize active set (for shrinking)
+	{
+		active_set = new int[l];
+		for(int i=0;i<l;i++)
+			active_set[i] = i;
+		active_size = l;
+	}
+
+	// initialize gradient
+	{
+		G = new double[l];
+		G_bar = new double[l];
+		int i;
+		for(i=0;i<l;i++)
+		{
+			G[i] = p[i];
+			G_bar[i] = 0;
+		}
+		for(i=0;i<l;i++)
+			if(!is_lower_bound(i))
+			{
+				const Qfloat *Q_i = Q.get_Q(i,l);
+				double alpha_i = alpha[i];
+				int j;
+				for(j=0;j<l;j++)
+					G[j] += alpha_i*Q_i[j];
+				if(is_upper_bound(i))
+					for(j=0;j<l;j++)
+						G_bar[j] += get_C(i) * Q_i[j];
+			}
+	}
+
+	// optimization step
+
+	int iter = 0;
+	int max_iter = max(10000000, l>INT_MAX/100 ? INT_MAX : 100*l);
+	int counter = min(l,1000)+1;
+
+	while(iter < max_iter)
+	{
+		// show progress and do shrinking
+
+		if(--counter == 0)
+		{
+			counter = min(l,1000);
+			if(shrinking) do_shrinking();
+			info(".");
+		}
+
+		int i,j;
+		if(select_working_set(i,j)!=0)
+		{
+			// reconstruct the whole gradient
+			reconstruct_gradient();
+			// reset active set size and check
+			active_size = l;
+			info("*");
+			if(select_working_set(i,j)!=0)
+				break;
+			else
+				counter = 1;	// do shrinking next iteration
+		}
+
+		++iter;
+
+		// update alpha[i] and alpha[j], handle bounds carefully
+
+		const Qfloat *Q_i = Q.get_Q(i,active_size);
+		const Qfloat *Q_j = Q.get_Q(j,active_size);
+
+		double C_i = get_C(i);
+		double C_j = get_C(j);
+
+		double old_alpha_i = alpha[i];
+		double old_alpha_j = alpha[j];
+
+		if(y[i]!=y[j])
+		{
+			double quad_coef = QD[i]+QD[j]+2*Q_i[j];
+			if (quad_coef <= 0)
+				quad_coef = TAU;
+			double delta = (-G[i]-G[j])/quad_coef;
+			double diff = alpha[i] - alpha[j];
+			alpha[i] += delta;
+			alpha[j] += delta;
+
+			if(diff > 0)
+			{
+				if(alpha[j] < 0)
+				{
+					alpha[j] = 0;
+					alpha[i] = diff;
+				}
+			}
+			else
+			{
+				if(alpha[i] < 0)
+				{
+					alpha[i] = 0;
+					alpha[j] = -diff;
+				}
+			}
+			if(diff > C_i - C_j)
+			{
+				if(alpha[i] > C_i)
+				{
+					alpha[i] = C_i;
+					alpha[j] = C_i - diff;
+				}
+			}
+			else
+			{
+				if(alpha[j] > C_j)
+				{
+					alpha[j] = C_j;
+					alpha[i] = C_j + diff;
+				}
+			}
+		}
+		else
+		{
+			double quad_coef = QD[i]+QD[j]-2*Q_i[j];
+			if (quad_coef <= 0)
+				quad_coef = TAU;
+			double delta = (G[i]-G[j])/quad_coef;
+			double sum = alpha[i] + alpha[j];
+			alpha[i] -= delta;
+			alpha[j] += delta;
+
+			if(sum > C_i)
+			{
+				if(alpha[i] > C_i)
+				{
+					alpha[i] = C_i;
+					alpha[j] = sum - C_i;
+				}
+			}
+			else
+			{
+				if(alpha[j] < 0)
+				{
+					alpha[j] = 0;
+					alpha[i] = sum;
+				}
+			}
+			if(sum > C_j)
+			{
+				if(alpha[j] > C_j)
+				{
+					alpha[j] = C_j;
+					alpha[i] = sum - C_j;
+				}
+			}
+			else
+			{
+				if(alpha[i] < 0)
+				{
+					alpha[i] = 0;
+					alpha[j] = sum;
+				}
+			}
+		}
+
+		// update G
+
+		double delta_alpha_i = alpha[i] - old_alpha_i;
+		double delta_alpha_j = alpha[j] - old_alpha_j;
+
+		for(int k=0;k<active_size;k++)
+		{
+			G[k] += Q_i[k]*delta_alpha_i + Q_j[k]*delta_alpha_j;
+		}
+
+		// update alpha_status and G_bar
+
+		{
+			bool ui = is_upper_bound(i);
+			bool uj = is_upper_bound(j);
+			update_alpha_status(i);
+			update_alpha_status(j);
+			int k;
+			if(ui != is_upper_bound(i))
+			{
+				Q_i = Q.get_Q(i,l);
+				if(ui)
+					for(k=0;k<l;k++)
+						G_bar[k] -= C_i * Q_i[k];
+				else
+					for(k=0;k<l;k++)
+						G_bar[k] += C_i * Q_i[k];
+			}
+
+			if(uj != is_upper_bound(j))
+			{
+				Q_j = Q.get_Q(j,l);
+				if(uj)
+					for(k=0;k<l;k++)
+						G_bar[k] -= C_j * Q_j[k];
+				else
+					for(k=0;k<l;k++)
+						G_bar[k] += C_j * Q_j[k];
+			}
+		}
+	}
+
+	if(iter >= max_iter)
+	{
+		if(active_size < l)
+		{
+			// reconstruct the whole gradient to calculate objective value
+			reconstruct_gradient();
+			active_size = l;
+			info("*");
+		}
+		fprintf(stderr,"\nWARNING: reaching max number of iterations\n");
+	}
+
+	// calculate rho
+
+	si->rho = calculate_rho();
+
+	// calculate objective value
+	{
+		double v = 0;
+		int i;
+		for(i=0;i<l;i++)
+			v += alpha[i] * (G[i] + p[i]);
+
+		si->obj = v/2;
+	}
+
+	// put back the solution
+	{
+		for(int i=0;i<l;i++)
+			alpha_[active_set[i]] = alpha[i];
+	}
+
+	// juggle everything back
+	/*{
+		for(int i=0;i<l;i++)
+			while(active_set[i] != i)
+				swap_index(i,active_set[i]);
+				// or Q.swap_index(i,active_set[i]);
+	}*/
+
+	si->upper_bound_p = Cp;
+	si->upper_bound_n = Cn;
+
+	info("\noptimization finished, #iter = %d\n",iter);
+
+	delete[] p;
+	delete[] y;
+	delete[] alpha;
+	delete[] alpha_status;
+	delete[] active_set;
+	delete[] G;
+	delete[] G_bar;
+}
+
+void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
 		   SolutionInfo* si, int shrinking)
 {
@@ -1482,6 +1766,41 @@ static void solve_c_svc(
 	delete[] y;
 }
 
+static void solve_w_svm(
+	const svm_problem *prob, const svm_parameter* param,
+	double *alpha, Solver::SolutionInfo* si, double Cp, double Cn)
+{
+	int l = prob->l;
+	double *minus_ones = new double[l];
+	schar *y = new schar[l];
+
+	int i;
+
+	for(i=0;i<l;i++)
+	{
+		alpha[i] = 0;
+		minus_ones[i] = -1;
+		if(prob->y[i] > 0) y[i] = +1; else y[i] = -1;
+	}
+
+	Solver s;
+	s.Solve(l, SVC_Q(*prob,*param,y), minus_ones, y,
+		alpha, Cp, Cn, param->eps, si, param->shrinking);
+
+	double sum_alpha=0;
+	for(i=0;i<l;i++)
+		sum_alpha += alpha[i];
+
+	if (Cp==Cn)
+		info("nu = %f\n", sum_alpha/(Cp*prob->l));
+
+	for(i=0;i<l;i++)
+		alpha[i] *= y[i];
+
+	delete[] minus_ones;
+	delete[] y;
+}
+
 static void solve_nu_svc(
 	const svm_problem *prob, const svm_parameter *param,
 	double *alpha, Solver::SolutionInfo* si)
@@ -1676,6 +1995,9 @@ static decision_function svm_train_one(
 			break;
 		case NU_SVR:
 			solve_nu_svr(prob,param,alpha,&si);
+			break;
+		case W_SVM:
+			solve_w_svm(prob,param,alpha,&si,Cp,Cn);
 			break;
 	}
 
@@ -3184,7 +3506,8 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 	   svm_type != NU_SVC &&
 	   svm_type != ONE_CLASS &&
 	   svm_type != EPSILON_SVR &&
-	   svm_type != NU_SVR)
+	   svm_type != NU_SVR && 
+	   svm_type != W_SVM)
 		return "unknown svm type";
 
 	// kernel_type, degree
