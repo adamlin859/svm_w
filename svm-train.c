@@ -99,7 +99,6 @@ int main(int argc, char **argv)
 		fprintf(stderr,"ERROR: %s\n",error_msg);
 		exit(1);
 	}
-	printf("here");
 
 	if(cross_validation)
 	{
@@ -265,6 +264,8 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	// determine filenames
 	if ((param.svm_type == W_SVM) && (transfer_file_name[0] == '\0'))
 		exit_with_help();
+	
+	strcpy(param.transfer_file_name, transfer_file_name);
 
 	if(i>=argc)
 		exit_with_help();

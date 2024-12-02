@@ -412,7 +412,7 @@ public:
 		   SolutionInfo* si, int shrinking);
 	void Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
-		   SolutionInfo* si, int shrinking);
+		   SolutionInfo* si, int shrinking, svm_model *model);
 protected:
 	int active_size;
 	schar *y;
@@ -791,7 +791,7 @@ void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
 
 void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
-		   SolutionInfo* si, int shrinking)
+		   SolutionInfo* si, int shrinking, svm_model *model)
 {
 	this->l = l;
 	this->Q = &Q;
@@ -841,6 +841,19 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 					for(j=0;j<l;j++)
 						G_bar[j] += get_C(i) * Q_i[j];
 			}
+
+		
+		
+		// for (i = 0; i < l; i++)
+		// {
+		// 	double sum = 0;
+		// 	for (int j = 0; j < model->l; j++)
+		// 	{
+		// 		sum += model->sv_coef[j] * Kernel::k_function(x, model->SV[j], model->param);
+		// 	}
+		// 	G[i] = 
+		// 	model->sv_coef[0][i] = alpha[i];
+		// }
 	}
 
 	// optimization step
@@ -1551,6 +1564,7 @@ double Solver_NU::calculate_rho()
 //
 // Q matrices for various formulations
 //
+svm_node ** x_transfer;
 class SVC_Q: public Kernel
 {
 public:
@@ -1558,6 +1572,7 @@ public:
 	:Kernel(prob.l, prob.x, param)
 	{
 		clone(y,y_,prob.l);
+		clone(x_transfer,prob.x,prob.l);
 		cache = new Cache(prob.l,(size_t)(param.cache_size*(1<<20)));
 		QD = new double[prob.l];
 		for(int i=0;i<prob.l;i++)
@@ -1577,6 +1592,22 @@ public:
 				data[j] = (Qfloat)(y[i]*y[j]*(this->*kernel_function)(i,j));
 		}
 		return data;
+	}
+
+	double get_transfer(int i, svm_model* model) const
+	{
+		double *sv_coef = model->sv_coef[0];
+		double sum = 0;
+		int j;
+
+#ifdef _OPENMP
+#pragma omp parallel for private(j) reduction(+:sum) schedule(guided)
+#endif
+		for(j=0;j<model->l;j++)
+		{
+			sum += y[i] * sv_coef[j] * Kernel::k_function(x_transfer[i],model->SV[j],model->param);
+		}
+		return sum;
 	}
 
 	double *get_QD() const
@@ -1775,6 +1806,13 @@ static void solve_w_svm(
 	schar *y = new schar[l];
 
 	int i;
+	struct svm_model* model;
+	if((model=svm_load_model(param->transfer_file_name))==0)
+	{
+		fprintf(stderr,"can't open model file %s\n",param->transfer_file_name);
+		exit(1);
+	}
+
 
 	for(i=0;i<l;i++)
 	{
@@ -1784,8 +1822,8 @@ static void solve_w_svm(
 	}
 
 	Solver s;
-	s.Solve(l, SVC_Q(*prob,*param,y), minus_ones, y,
-		alpha, Cp, Cn, param->eps, si, param->shrinking);
+	s.Solve_w(l, SVC_Q(*prob,*param,y), minus_ones, y,
+		alpha, Cp, Cn, param->eps, si, param->shrinking, model);
 
 	double sum_alpha=0;
 	for(i=0;i<l;i++)
