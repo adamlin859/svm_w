@@ -412,11 +412,12 @@ public:
 		   SolutionInfo* si, int shrinking);
 	void Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
-		   SolutionInfo* si, int shrinking, svm_model *model);
+		   SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob);
 protected:
 	int active_size;
 	schar *y;
 	double *G;		// gradient of objective function
+	double *G_w;	// gradient of objective function \hat{w}
 	enum { LOWER_BOUND, UPPER_BOUND, FREE };
 	char *alpha_status;	// LOWER_BOUND, UPPER_BOUND, FREE
 	double *alpha;
@@ -447,6 +448,7 @@ protected:
 	bool is_free(int i) { return alpha_status[i] == FREE; }
 	void swap_index(int i, int j);
 	void reconstruct_gradient();
+	void reconstruct_gradient_w();
 	virtual int select_working_set(int &i, int &j);
 	virtual double calculate_rho();
 	virtual void do_shrinking();
@@ -508,6 +510,53 @@ void Solver::reconstruct_gradient()
 	}
 }
 
+void Solver::reconstruct_gradient_w()
+{
+	// reconstruct inactive elements of G from G_bar and free variables
+
+	if(active_size == l) return;
+
+	int i,j;
+	int nr_free = 0;
+
+	for(j=active_size;j<l;j++)
+		G[j] = G_bar[j] + p[j];
+
+	for(j=0;j<active_size;j++)
+		if(is_free(j))
+			nr_free++;
+
+	if(2*nr_free < active_size)
+		info("\nWARNING: using -h 0 may be faster\n");
+
+	if (nr_free*l > 2*active_size*(l-active_size))
+	{
+		for(i=active_size;i<l;i++)
+		{
+			const Qfloat *Q_i = Q->get_Q(i,active_size);
+			for(j=0;j<active_size;j++)
+				if(is_free(j))
+					G[i] += alpha[j] * Q_i[j];
+			
+			G[i] += G_w[i];
+		}
+		
+	}
+	else
+	{
+		for(i=0;i<active_size;i++)
+			if(is_free(i))
+			{
+				const Qfloat *Q_i = Q->get_Q(i,l);
+				double alpha_i = alpha[i];
+				for(j=active_size;j<l;j++)
+					G[j] += alpha_i * Q_i[j];
+
+				G[j] += G_w[j];
+			}
+	}
+}
+
 void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
 		   SolutionInfo* si, int shrinking)
@@ -559,6 +608,7 @@ void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
 				if(is_upper_bound(i))
 					for(j=0;j<l;j++)
 						G_bar[j] += get_C(i) * Q_i[j];
+					
 			}
 	}
 
@@ -791,8 +841,9 @@ void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
 
 void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
-		   SolutionInfo* si, int shrinking, svm_model *model)
+		   SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob)
 {
+
 	this->l = l;
 	this->Q = &Q;
 	QD=Q.get_QD();
@@ -822,6 +873,7 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 	// initialize gradient
 	{
 		G = new double[l];
+		G_w = new double[l];
 		G_bar = new double[l];
 		int i;
 		for(i=0;i<l;i++)
@@ -844,16 +896,23 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 
 		
 		
-		// for (i = 0; i < l; i++)
-		// {
-		// 	double sum = 0;
-		// 	for (int j = 0; j < model->l; j++)
-		// 	{
-		// 		sum += model->sv_coef[j] * Kernel::k_function(x, model->SV[j], model->param);
-		// 	}
-		// 	G[i] = 
-		// 	model->sv_coef[0][i] = alpha[i];
-		// }
+		for (i = 0; i < l; i++) 
+		{
+			double *sv_coef = model->sv_coef[0];
+			double sum = 0;
+			int j;
+
+#ifdef _OPENMP
+#pragma omp parallel for private(j) reduction(+:sum) schedule(guided)
+#endif
+			for(j=0;j<model->l;j++)
+			{
+				sum += y[i] * sv_coef[j] * Kernel::k_function(prob.x[i],model->SV[j],model->param);
+			}
+			// print G[i] and sum
+			G_w[i] = sum;
+			G[i] += G_w[i]; 
+		}
 	}
 
 	// optimization step
@@ -877,7 +936,7 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		if(select_working_set(i,j)!=0)
 		{
 			// reconstruct the whole gradient
-			reconstruct_gradient();
+			reconstruct_gradient_w();
 			// reset active set size and check
 			active_size = l;
 			info("*");
@@ -1021,10 +1080,17 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 				Q_j = Q.get_Q(j,l);
 				if(uj)
 					for(k=0;k<l;k++)
+					{
 						G_bar[k] -= C_j * Q_j[k];
+						G_bar[k] += G_w[k];
+					}
 				else
 					for(k=0;k<l;k++)
+					{
 						G_bar[k] += C_j * Q_j[k];
+						G_bar[k] += G_w[k];
+					}
+				
 			}
 		}
 	}
@@ -1034,7 +1100,7 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		if(active_size < l)
 		{
 			// reconstruct the whole gradient to calculate objective value
-			reconstruct_gradient();
+			reconstruct_gradient_w();
 			active_size = l;
 			info("*");
 		}
@@ -1080,6 +1146,7 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 	delete[] alpha_status;
 	delete[] active_set;
 	delete[] G;
+	delete[] G_w;
 	delete[] G_bar;
 }
 
@@ -1564,7 +1631,6 @@ double Solver_NU::calculate_rho()
 //
 // Q matrices for various formulations
 //
-svm_node ** x_transfer;
 class SVC_Q: public Kernel
 {
 public:
@@ -1572,7 +1638,6 @@ public:
 	:Kernel(prob.l, prob.x, param)
 	{
 		clone(y,y_,prob.l);
-		clone(x_transfer,prob.x,prob.l);
 		cache = new Cache(prob.l,(size_t)(param.cache_size*(1<<20)));
 		QD = new double[prob.l];
 		for(int i=0;i<prob.l;i++)
@@ -1592,22 +1657,6 @@ public:
 				data[j] = (Qfloat)(y[i]*y[j]*(this->*kernel_function)(i,j));
 		}
 		return data;
-	}
-
-	double get_transfer(int i, svm_model* model) const
-	{
-		double *sv_coef = model->sv_coef[0];
-		double sum = 0;
-		int j;
-
-#ifdef _OPENMP
-#pragma omp parallel for private(j) reduction(+:sum) schedule(guided)
-#endif
-		for(j=0;j<model->l;j++)
-		{
-			sum += y[i] * sv_coef[j] * Kernel::k_function(x_transfer[i],model->SV[j],model->param);
-		}
-		return sum;
 	}
 
 	double *get_QD() const
@@ -1823,7 +1872,7 @@ static void solve_w_svm(
 
 	Solver s;
 	s.Solve_w(l, SVC_Q(*prob,*param,y), minus_ones, y,
-		alpha, Cp, Cn, param->eps, si, param->shrinking, model);
+		alpha, Cp, Cn, param->eps, si, param->shrinking, model, *prob);
 
 	double sum_alpha=0;
 	for(i=0;i<l;i++)
@@ -2979,6 +3028,102 @@ double svm_predict_values(const svm_model *model, const svm_node *x, double* dec
 		else
 			return sum;
 	}
+	else if(model->param.svm_type == W_SVM)
+	{
+		
+		int nr_class = model->nr_class;
+		int l = model->l;
+		
+		double t_sum = 0;
+		
+
+		double *kvalue = Malloc(double,l);
+
+		struct svm_model* t_model;
+		if((t_model=svm_load_model(model->param.transfer_file_name))==0)
+		{
+			fprintf(stderr,"can't open model file %s\n",model->param.transfer_file_name);
+			exit(1);
+		}
+		int t = t_model->l;
+
+		double *kvalue2 = Malloc(double,t);
+
+#ifdef _OPENMP
+#pragma omp parallel for private(i) schedule(guided)
+#endif
+		for(i=0;i<l;i++)
+			kvalue[i] = Kernel::k_function(x,model->SV[i],model->param);
+		
+		
+		for (i=0;i<t;i++)
+			kvalue2[i]= Kernel::k_function(x,t_model->SV[i],t_model->param);
+
+		int *start = Malloc(int,nr_class);
+		start[0] = 0;
+		for(i=1;i<nr_class;i++)
+			start[i] = start[i-1]+model->nSV[i-1];
+
+		int *start2 = Malloc(int,model->nr_class);
+		start2[0] = 0;
+		for(i=1;i<model->nr_class;i++)
+			start2[i] = start2[i-1]+t_model->nSV[i-1];
+
+		int *vote = Malloc(int,nr_class);
+		for(i=0;i<nr_class;i++)
+			vote[i] = 0;
+
+		int p=0;
+		for(i=0;i<nr_class;i++)
+			for(int j=i+1;j<nr_class;j++)
+			{
+				double sum = 0;
+				int si = start[i];
+				int sj = start[j];
+				int ci = model->nSV[i];
+				int cj = model->nSV[j];
+
+				int k;
+				double *coef1 = model->sv_coef[j-1];
+				double *coef2 = model->sv_coef[i];
+				for(k=0;k<ci;k++)
+					sum += coef1[si+k] * kvalue[si+k];
+				for(k=0;k<cj;k++)
+					sum += coef2[sj+k] * kvalue[sj+k];
+				sum -= model->rho[p];
+
+				int si2 = start2[i];
+				int sj2 = start2[j];
+				int ci2 = t_model->nSV[i];
+				int cj2 = t_model->nSV[j];
+
+				double *coef12 = t_model->sv_coef[j-1];
+				double *coef22 = t_model->sv_coef[i];
+				for(k=0;k<ci2;k++)
+					sum += coef12[si2+k] * kvalue2[si2+k];
+				for(k=0;k<cj2;k++)
+					sum += coef22[sj2+k] * kvalue2[sj2+k];
+				sum -= t_model->rho[p];
+				
+				dec_values[p] = sum;
+
+				if(dec_values[p] > 0)
+					++vote[i];
+				else
+					++vote[j];
+				p++;
+			}
+
+		int vote_max_idx = 0;
+		for(i=1;i<nr_class;i++)
+			if(vote[i] > vote[vote_max_idx])
+				vote_max_idx = i;
+
+		free(kvalue);
+		free(start);
+		free(vote);
+		return model->label[vote_max_idx];
+	}
 	else
 	{
 		int nr_class = model->nr_class;
@@ -3109,7 +3254,7 @@ double svm_predict_probability(
 
 static const char *svm_type_table[] =
 {
-	"c_svc","nu_svc","one_class","epsilon_svr","nu_svr",NULL
+	"c_svc","nu_svc","one_class","epsilon_svr","nu_svr","w_svm",NULL
 };
 
 static const char *kernel_type_table[]=
@@ -3132,6 +3277,9 @@ int svm_save_model(const char *model_file_name, const svm_model *model)
 
 	fprintf(fp,"svm_type %s\n", svm_type_table[param.svm_type]);
 	fprintf(fp,"kernel_type %s\n", kernel_type_table[param.kernel_type]);
+
+	if(param.svm_type == W_SVM)
+		fprintf(fp,"t_model %s\n", param.transfer_file_name);
 
 	if(param.kernel_type == POLY)
 		fprintf(fp,"degree %d\n", param.degree);
@@ -3299,6 +3447,11 @@ bool read_model_header(FILE *fp, svm_model* model)
 				fprintf(stderr,"unknown kernel function.\n");
 				return false;
 			}
+		}
+		else if(strcmp(cmd,"t_model")==0)
+		{
+			// transfer model file name
+			FSCANF(fp,"%80s",&param.transfer_file_name);
 		}
 		else if(strcmp(cmd,"degree")==0)
 			FSCANF(fp,"%d",&param.degree);
