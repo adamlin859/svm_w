@@ -20,6 +20,7 @@ void exit_with_help()
 	"	3 -- epsilon-SVR	(regression)\n"
 	"	4 -- nu-SVR		(regression)\n"
 	"	5 -- w-SVM     (Transfer Learning SVM)\n"
+	"	6 -- w-SVM+     (Transfer Learning SVM+)\n"
 	"-t kernel_type : set type of kernel function (default 2)\n"
 	"	0 -- linear: u'*v\n"
 	"	1 -- polynomial: (gamma*u'*v + coef0)^degree\n"
@@ -56,8 +57,10 @@ void do_cross_validation();
 
 struct svm_parameter param;		// set by parse_command_line
 struct svm_problem prob;		// set by read_problem
+struct svm_problem prob_star;		// set by read_problem_star
 struct svm_model *model;
 struct svm_node *x_space;
+struct svm_node *x_space_star;
 int cross_validation;
 int nr_fold;
 
@@ -85,12 +88,17 @@ static char* readline(FILE *input)
 int main(int argc, char **argv)
 {
 	char input_file_name[1024];
+	char input_file_name_star[1024];
 	char model_file_name[1024];
 	char transfer_file_name[1024];
 	const char *error_msg;
 
 	parse_command_line(argc, argv, input_file_name, model_file_name, transfer_file_name);
 	read_problem(input_file_name);
+	// if (param.svm_type == W_SVM_PLUS)
+	// {
+	// 	read_problem(input_file_name_star);
+	// }
 	error_msg = svm_check_parameter(&prob,&param);
 	
 
@@ -118,6 +126,9 @@ int main(int argc, char **argv)
 	free(prob.y);
 	free(prob.x);
 	free(x_space);
+	free(prob_star.y);
+	free(prob_star.x);
+	free(x_space_star);
 	free(line);
 
 	return 0;
@@ -383,6 +394,111 @@ void read_problem(const char *filename)
 				exit(1);
 			}
 			if ((int)prob.x[i][0].value <= 0 || (int)prob.x[i][0].value > max_index)
+			{
+				fprintf(stderr,"Wrong input format: sample_serial_number out of range\n");
+				exit(1);
+			}
+		}
+
+	fclose(fp);
+}
+
+
+void read_problem_star(const char *filename)
+{
+	int max_index, inst_max_index, i;
+	size_t elements, j;
+	FILE *fp = fopen(filename,"r");
+	char *endptr;
+	char *idx, *val, *label;
+
+	if(fp == NULL)
+	{
+		fprintf(stderr,"can't open input file %s\n",filename);
+		exit(1);
+	}
+
+	prob_star.l = 0;
+	elements = 0;
+
+	max_line_len = 1024;
+	line = Malloc(char,max_line_len);
+	while(readline(fp)!=NULL)
+	{
+		char *p = strtok(line," \t"); // label
+
+		// features
+		while(1)
+		{
+			p = strtok(NULL," \t");
+			if(p == NULL || *p == '\n') // check '\n' as ' ' may be after the last feature
+				break;
+			++elements;
+		}
+		++elements;
+		++prob_star.l;
+	}
+	rewind(fp);
+
+	prob_star.y = Malloc(double,prob_star.l);
+	prob_star.x = Malloc(struct svm_node *,prob_star.l);
+	x_space_star = Malloc(struct svm_node,elements);
+
+	max_index = 0;
+	j=0;
+	for(i=0;i<prob_star.l;i++)
+	{
+		inst_max_index = -1; // strtol gives 0 if wrong format, and precomputed kernel has <index> start from 0
+		readline(fp);
+		prob_star.x[i] = &x_space_star[j];
+		label = strtok(line," \t\n");
+		if(label == NULL) // empty line
+			exit_input_error(i+1);
+
+		prob_star.y[i] = strtod(label,&endptr);
+		if(endptr == label || *endptr != '\0')
+			exit_input_error(i+1);
+
+		while(1)
+		{
+			idx = strtok(NULL,":");
+			val = strtok(NULL," \t");
+
+			if(val == NULL)
+				break;
+
+			errno = 0;
+			x_space_star[j].index = (int) strtol(idx,&endptr,10);
+			if(endptr == idx || errno != 0 || *endptr != '\0' || x_space_star[j].index <= inst_max_index)
+				exit_input_error(i+1);
+			else
+				inst_max_index = x_space_star[j].index;
+
+			errno = 0;
+			x_space_star[j].value = strtod(val,&endptr);
+			if(endptr == val || errno != 0 || (*endptr != '\0' && !isspace(*endptr)))
+				exit_input_error(i+1);
+
+			++j;
+		}
+
+		if(inst_max_index > max_index)
+			max_index = inst_max_index;
+		x_space_star[j++].index = -1;
+	}
+
+	if(param.gamma == 0 && max_index > 0)
+		param.gamma = 1.0/max_index;
+
+	if(param.kernel_type == PRECOMPUTED)
+		for(i=0;i<prob_star.l;i++)
+		{
+			if (prob_star.x[i][0].index != 0)
+			{
+				fprintf(stderr,"Wrong input format: first column must be 0:sample_serial_number\n");
+				exit(1);
+			}
+			if ((int)prob_star.x[i][0].value <= 0 || (int)prob_star.x[i][0].value > max_index)
 			{
 				fprintf(stderr,"Wrong input format: sample_serial_number out of range\n");
 				exit(1);
