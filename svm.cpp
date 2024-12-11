@@ -402,6 +402,7 @@ public:
 	struct SolutionInfo {
 		double obj;
 		double rho;
+		double rho_star;
 		double upper_bound_p;
 		double upper_bound_n;
 		double r;	// for Solver_NU
@@ -1888,6 +1889,14 @@ static void solve_w_svm(
 	delete[] y;
 }
 
+static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
+			   double *alpha, double *beta, Solver::SolutionInfo* si, double Cp, double Cn)
+{
+ 
+
+}
+
+
 static void solve_nu_svc(
 	const svm_problem *prob, const svm_parameter *param,
 	double *alpha, Solver::SolutionInfo* si)
@@ -2067,6 +2076,10 @@ static decision_function svm_train_one(
 	double Cp, double Cn)
 {
 	double *alpha = Malloc(double,prob->l);
+	double *beta = NULL;
+	if(param->svm_type == SVM_PLUS)
+		beta = Malloc(double,prob->l);
+
 	Solver::SolutionInfo si;
 	switch(param->svm_type)
 	{
@@ -2088,6 +2101,9 @@ static decision_function svm_train_one(
 		case W_SVM:
 			solve_w_svm(prob,param,alpha,&si,Cp,Cn);
 			break;
+		case SVM_PLUS:
+			solve_svm_plus(prob,param,alpha,beta,&si,Cp,Cn);
+			break;
 	}
 
 	info("obj = %f, rho = %f\n",si.obj,si.rho);
@@ -2096,29 +2112,49 @@ static decision_function svm_train_one(
 
 	int nSV = 0;
 	int nBSV = 0;
+	int nBSV_star = 0;
+	int nSV_star = 0;
+	
 	for(int i=0;i<prob->l;i++)
 	{
 		if(fabs(alpha[i]) > 0)
 		{
 			++nSV;
-			if(prob->y[i] > 0)
-			{
-				if(fabs(alpha[i]) >= si.upper_bound_p)
-					++nBSV;
+			if (param->svm_type != SVM_PLUS) 
+			{	
+				if(prob->y[i] > 0)
+				{
+					if(fabs(alpha[i]) >= si.upper_bound_p)
+						++nBSV;
+				}
+				else
+				{
+					if(fabs(alpha[i]) >= si.upper_bound_n)
+						++nBSV;
+				}
 			}
-			else
-			{
-				if(fabs(alpha[i]) >= si.upper_bound_n)
-					++nBSV;
-			}
+		}
+		if (param->svm_type == SVM_PLUS)
+		{
+			if(fabs(beta[i]) > 0)
+				++nSV_star;
 		}
 	}
 
 	info("nSV = %d, nBSV = %d\n",nSV,nBSV);
-
+	if (param->svm_type == SVM_PLUS)
+		info("nSV_star = %d nBSV_star = %d \n",nSV_star,nBSV_star);
+	
 	decision_function f;
 	f.alpha = alpha;
 	f.rho = si.rho;
+	
+	if (param->svm_type == SVM_PLUS) 
+	{
+		f.beta = beta;
+		f.rho_star = si.rho_star;
+	}
+
 	return f;
 }
 
