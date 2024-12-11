@@ -2057,7 +2057,9 @@ static void solve_nu_svr(
 struct decision_function
 {
 	double *alpha;
+	double *beta;
 	double rho;
+	double rho_star;
 };
 
 static decision_function svm_train_one(
@@ -2661,6 +2663,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 			info("WARNING: training data in only one class. See README for details.\n");
 
 		svm_node **x = Malloc(svm_node *,l);
+		svm_node **x_star = NULL;
 		int i;
 		for(i=0;i<l;i++)
 			x[i] = prob->x[perm[i]];
@@ -2685,8 +2688,13 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		// train k*(k-1)/2 models
 
 		bool *nonzero = Malloc(bool,l);
-		for(i=0;i<l;i++)
+		bool *nonzero_star = Malloc(bool,l);
+		for(i=0;i<l;i++) 
+		{
 			nonzero[i] = false;
+			nonzero_star[i] = false;
+		}
+			
 		decision_function *f = Malloc(decision_function,nr_class*(nr_class-1)/2);
 
 		double *probA=NULL,*probB=NULL;
@@ -2696,7 +2704,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 			probB=Malloc(double,nr_class*(nr_class-1)/2);
 		}
 
-		int p = 0;
+		int p = 0, p_star = 0;
 		for(i=0;i<nr_class;i++)
 			for(int j=i+1;j<nr_class;j++)
 			{
@@ -2706,29 +2714,52 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				sub_prob.l = ci+cj;
 				sub_prob.x = Malloc(svm_node *,sub_prob.l);
 				sub_prob.y = Malloc(double,sub_prob.l);
+				if(param->svm_type == SVM_PLUS)
+					sub_prob.x_star = Malloc(svm_node *,sub_prob.l);    				
 				int k;
 				for(k=0;k<ci;k++)
 				{
 					sub_prob.x[k] = x[si+k];
 					sub_prob.y[k] = +1;
+					if(param->svm_type == SVM_PLUS)
+		  				sub_prob.x_star[k] = x_star[si+k];
 				}
 				for(k=0;k<cj;k++)
 				{
 					sub_prob.x[ci+k] = x[sj+k];
 					sub_prob.y[ci+k] = -1;
+					if(param->svm_type == SVM_PLUS)
+		  				sub_prob.x_star[k] = x_star[sj+k];					
 				}
 
 				if(param->probability)
 					svm_binary_svc_probability(&sub_prob,param,weighted_C[i],weighted_C[j],probA[p],probB[p]);
 
 				f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
-				for(k=0;k<ci;k++)
+
+				for(k=0;k<ci;k++) 
+				{
 					if(!nonzero[si+k] && fabs(f[p].alpha[k]) > 0)
 						nonzero[si+k] = true;
+					if(param->svm_type == SVM_PLUS) 
+					{
+						if(!nonzero_star[si+k] && f[p].beta[k] > 0) 
+							nonzero_star[si+k] = true;
+					}
+				}
 				for(k=0;k<cj;k++)
+				{
 					if(!nonzero[sj+k] && fabs(f[p].alpha[ci+k]) > 0)
 						nonzero[sj+k] = true;
+					if(param->svm_type == SVM_PLUS)
+					{
+						if(!nonzero_star[sj+k] && f[p].beta[ci+k] > 0) 
+		  					nonzero_star[sj+k] = true;
+					}
+				}
 				free(sub_prob.x);
+				if(param->svm_type == SVM_PLUS)
+	      			free(sub_prob.x_star);
 				free(sub_prob.y);
 				++p;
 			}
@@ -2744,6 +2775,13 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		model->rho = Malloc(double,nr_class*(nr_class-1)/2);
 		for(i=0;i<nr_class*(nr_class-1)/2;i++)
 			model->rho[i] = f[i].rho;
+
+    	if(param->svm_type == SVM_PLUS) 
+		{
+			model->rho_star = Malloc(double,nr_class*(nr_class-1)/2);
+			for(i=0;i<nr_class*(nr_class-1)/2;i++)
+	  			model->rho_star[i] = f[i].rho_star;
+    	}		
 
 		if(param->probability)
 		{
@@ -2763,22 +2801,37 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		model->prob_density_marks=NULL;	// for one-class SVM probabilistic outputs only
 
 		int total_sv = 0;
+		int total_sv_star = 0;
 		int *nz_count = Malloc(int,nr_class);
+		int *nz_count_star = Malloc(int,nr_class);
+
 		model->nSV = Malloc(int,nr_class);
+		model->nSV_star = Malloc(int,nr_class);
 		for(i=0;i<nr_class;i++)
 		{
 			int nSV = 0;
+			int nSV_star = 0;
 			for(int j=0;j<count[i];j++)
+			{
 				if(nonzero[start[i]+j])
 				{
 					++nSV;
 					++total_sv;
 				}
+				if(nonzero_star[start[i]+j])
+				{
+					++nSV_star;
+					++total_sv_star;
+				}
+			}
 			model->nSV[i] = nSV;
 			nz_count[i] = nSV;
+			model->nSV_star[i] = nSV_star;
+	  		nz_count_star[i] = nSV_star;
 		}
 
 		info("Total nSV = %d\n",total_sv);
+		info("Total nSV_star = %d\n",total_sv_star);
 
 		model->l = total_sv;
 		model->SV = Malloc(svm_node *,total_sv);
@@ -2790,6 +2843,19 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				model->SV[p] = x[i];
 				model->sv_indices[p++] = perm[i] + 1;
 			}
+		
+		if(model->param.svm_type == SVM_PLUS)
+			{
+				model->SV_star = Malloc(svm_node *,total_sv_star);
+				model->sv_indices_star = Malloc(int,total_sv_star);
+				p_star = 0;
+				for(i=0;i<l;i++)
+					if(nonzero_star[i]) 
+					{
+						model->SV_star[p_star] = x_star[i];
+						model->sv_indices_star[p_star++] = perm[i] + 1;
+					}
+			}
 
 		int *nz_start = Malloc(int,nr_class);
 		nz_start[0] = 0;
@@ -2800,6 +2866,19 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		for(i=0;i<nr_class-1;i++)
 			model->sv_coef[i] = Malloc(double,total_sv);
 
+		int *nz_start_star=NULL;
+
+		if(model->param.svm_type == SVM_PLUS)
+		{
+			nz_start_star = Malloc(int,nr_class);
+			nz_start_star[0] = 0;
+			for(i=1;i<nr_class;i++)
+				nz_start_star[i] = nz_start_star[i-1]+nz_count_star[i-1];
+
+			model->sv_coef_star = Malloc(double *,nr_class-1);
+			for(i=0;i<nr_class-1;i++)
+				model->sv_coef_star[i] = Malloc(double,total_sv_star);
+		}
 		p = 0;
 		for(i=0;i<nr_class;i++)
 			for(int j=i+1;j<nr_class;j++)
@@ -2815,13 +2894,28 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 
 				int q = nz_start[i];
 				int k;
+				int q_star = 0;
+				if(model->param.svm_type == SVM_PLUS)
+					q_star = nz_start_star[i];
+
 				for(k=0;k<ci;k++)
+				{
 					if(nonzero[si+k])
 						model->sv_coef[j-1][q++] = f[p].alpha[k];
+					if(model->param.svm_type == SVM_PLUS)
+						if(nonzero_star[si+k])
+							model->sv_coef_star[j-1][q_star++] = f[p].beta[k];
+				}
+
 				q = nz_start[j];
+				if(model->param.svm_type == SVM_PLUS)
+					q_star = nz_start_star[j];
 				for(k=0;k<cj;k++)
 					if(nonzero[sj+k])
 						model->sv_coef[i][q++] = f[p].alpha[ci+k];
+					if(model->param.svm_type == SVM_PLUS)
+						if(nonzero_star[sj+k])
+							model->sv_coef_star[i][q_star++] = f[p].beta[ci+k];
 				++p;
 			}
 
@@ -2836,9 +2930,14 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		free(nonzero);
 		for(i=0;i<nr_class*(nr_class-1)/2;i++)
 			free(f[i].alpha);
-		free(f);
 		free(nz_count);
 		free(nz_start);
+		if (model->param.svm_type == SVM_PLUS)
+		{
+			free(nz_count_star);
+			free(nz_start_star);
+		}
+		free(f);
 	}
 	return model;
 }

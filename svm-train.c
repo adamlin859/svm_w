@@ -20,7 +20,8 @@ void exit_with_help()
 	"	3 -- epsilon-SVR	(regression)\n"
 	"	4 -- nu-SVR		(regression)\n"
 	"	5 -- w-SVM     (Transfer Learning SVM)\n"
-	"	6 -- w-SVM+     (Transfer Learning SVM+)\n"
+	"	6 -- SVM+     (SVM+)\n"
+	"	7 -- SVM+TL     (SVM+TL)\n"
 	"-t kernel_type : set type of kernel function (default 2)\n"
 	"	0 -- linear: u'*v\n"
 	"	1 -- polynomial: (gamma*u'*v + coef0)^degree\n"
@@ -53,6 +54,7 @@ void exit_input_error(int line_num)
 
 void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name);
 void read_problem(const char *filename);
+void read_problem_star(const char *filename);
 void do_cross_validation();
 
 struct svm_parameter param;		// set by parse_command_line
@@ -95,10 +97,11 @@ int main(int argc, char **argv)
 
 	parse_command_line(argc, argv, input_file_name, model_file_name, transfer_file_name);
 	read_problem(input_file_name);
-	// if (param.svm_type == W_SVM_PLUS)
-	// {
-	// 	read_problem(input_file_name_star);
-	// }
+	
+	if (param.svm_type == SVM_PLUS)
+	{
+		read_problem_star(input_file_name_star);
+	}
 	error_msg = svm_check_parameter(&prob,&param);
 	
 
@@ -317,7 +320,7 @@ void read_problem(const char *filename)
 	elements = 0;
 
 	max_line_len = 1024;
-	line = Malloc(char,max_line_len);
+	line = Malloc(char, max_line_len);
 	while(readline(fp)!=NULL)
 	{
 		char *p = strtok(line," \t"); // label

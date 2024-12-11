@@ -20,9 +20,10 @@ struct svm_problem
 	int l;
 	double *y;
 	struct svm_node **x;
+	struct svm_node **x_star;
 };
 
-enum { C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR, W_SVM, W_SVM_PLUS };	/* svm_type */
+enum { C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR, W_SVM, SVM_PLUS };	/* svm_type */
 enum { LINEAR, POLY, RBF, SIGMOID, PRECOMPUTED }; /* kernel_type */
 
 struct svm_parameter
@@ -54,23 +55,31 @@ struct svm_model
 {
 	struct svm_parameter param;	/* parameter */
 	int nr_class;		/* number of classes, = 2 in regression/one class svm */
-	int l;			/* total #SV */
+	int l;			/* total #SV */ 
 	struct svm_node **SV;		/* SVs (SV[l]) */
+	struct svm_node **SV_star;     // SV_stars (SV_star[l_star])
 	double **sv_coef;	/* coefficients for SVs in decision functions (sv_coef[k-1][l]) */
+	double **sv_coef_star;	// coefficients for SVs in correcting functions (sv_coef[k-1][l]) 
 	double *rho;		/* constants in decision functions (rho[k*(k-1)/2]) */
+	double *rho_star;       // constants in correcting functions (rho[k*(k-1)/2])
 	double *probA;		/* pariwise probability information */
 	double *probB;
 	double *prob_density_marks;	/* probability information for ONE_CLASS */
 	int *sv_indices;        /* sv_indices[0,...,nSV-1] are values in [1,...,num_traning_data] to indicate SVs in the training set */
+	int *sv_indices_star;   /* sv_indices_star[0,...,nSV_star-1] are values in [1,...,num_traning_data_star] to indicate SVs in the training set */
 
 	/* for classification only */
 
 	int *label;		/* label of each class (label[k]) */
 	int *nSV;		/* number of SVs for each class (nSV[k]) */
 				/* nSV[0] + nSV[1] + ... + nSV[k-1] = l */
+	int *nSV_star;		// number of SVs for each class (nSV_star[k])
 	/* XXX */
 	int free_sv;		/* 1 if svm_model is created by svm_load_model*/
 				/* 0 if svm_model is created by svm_train */
+	
+	
+
 };
 
 struct svm_model *svm_train(const struct svm_problem *prob, const struct svm_parameter *param);
