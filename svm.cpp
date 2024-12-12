@@ -414,6 +414,9 @@ public:
 	void Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 		   double *alpha_, double Cp, double Cn, double eps,
 		   SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob);
+	void Solve_plus(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
+			     double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
+			     SolutionInfo* si, int shrinking);
 protected:
 	int active_size;
 	schar *y;
@@ -432,6 +435,23 @@ protected:
 	int l;
 	bool unshrink;	// XXX
 
+	// SVM plus
+	double *g;
+	double *g_beta;
+	double *g_init;
+	double *g_beta_init;
+	char *beta_status;
+	double *beta;
+	const QMatrix *Q_star;
+	const QMatrix *Q_star_beta;
+	const double *QD_star;
+	const double *QD_star_beta;
+	int *active_set_beta;
+	int *true_act_set;
+	int *true_act_set_beta;
+	int active_size_beta;
+	double tau;
+
 	double get_C(int i)
 	{
 		return (y[i] > 0)? Cp : Cn;
@@ -444,17 +464,38 @@ protected:
 			alpha_status[i] = LOWER_BOUND;
 		else alpha_status[i] = FREE;
 	}
+
+	void update_beta_status(int i)
+	{
+		if(beta[i] <= 1e-8)
+			beta_status[i] = LOWER_BOUND;
+		else beta_status[i] = FREE;
+	}
+
 	bool is_upper_bound(int i) { return alpha_status[i] == UPPER_BOUND; }
 	bool is_lower_bound(int i) { return alpha_status[i] == LOWER_BOUND; }
 	bool is_free(int i) { return alpha_status[i] == FREE; }
 	void swap_index(int i, int j);
 	void reconstruct_gradient();
 	void reconstruct_gradient_w();
+	void reconstruct_gradient_plus();
 	virtual int select_working_set(int &i, int &j);
 	virtual double calculate_rho();
 	virtual void do_shrinking();
+
+	// SVM plus
+	bool is_lower_bound_beta(int i) { return beta_status[i] == LOWER_BOUND; }
+	bool is_free_beta(int i) { return beta_status[i] == FREE; }
+	void swap_index_beta(int i, int j);
+	void swap_index_alpha(int i, int j);
+	virtual int select_working_set_plus(int& set_type, int& i, int& j, int& k, int iter);
+	virtual void calculate_rho_plus(double& rho, double& rho_star);
+	virtual void do_shrinking_plus();
 private:
 	bool be_shrunk(int i, double Gmax1, double Gmax2);
+	bool be_shrunk_alpha(int i, double max_B1, double max_A1, double max_A2,  double min_B1B2, double min_A1A3, double min_A2A4);
+	bool be_shrunk_beta(int i, double max_B1, double max_A1, double max_A2,  double min_B1B2, double min_A1A3, double min_A2A4);
+ 
 };
 
 void Solver::swap_index(int i, int j)
@@ -467,6 +508,31 @@ void Solver::swap_index(int i, int j)
 	swap(p[i],p[j]);
 	swap(active_set[i],active_set[j]);
 	swap(G_bar[i],G_bar[j]);
+}
+
+void Solver::swap_index_alpha(int i, int j)
+{
+  Q->swap_index(i,j);
+  Q_star->swap_index(i,j);
+  swap(y[i],y[j]);
+  swap(alpha_status[i],alpha_status[j]);
+  swap(alpha[i],alpha[j]);
+  swap(true_act_set[active_set[i]],true_act_set[active_set[j]]);
+  swap(active_set[i],active_set[j]);
+  swap(G[i],G[j]);
+  swap(g[i],g[j]);
+  swap(g_init[i],g_init[j]);
+}
+
+void Solver::swap_index_beta(int i, int j)
+{
+  Q_star_beta->swap_index(i,j);
+  swap(beta_status[i],beta_status[j]);
+  swap(beta[i],beta[j]);
+  swap(true_act_set_beta[active_set_beta[i]],true_act_set_beta[active_set_beta[j]]);
+  swap(active_set_beta[i],active_set_beta[j]);
+  swap(g_beta[i],g_beta[j]);
+  swap(g_beta_init[i],g_beta_init[j]);
 }
 
 void Solver::reconstruct_gradient()
@@ -555,6 +621,57 @@ void Solver::reconstruct_gradient_w()
 
 				G[j] += G_w[j];
 			}
+	}
+}
+
+void Solver::reconstruct_gradient_plus()
+{
+	int i, j, true_i, act_set_i;
+
+	if(active_size < l) 
+	{
+		for(i=active_size;i<l;i++) {
+			const Qfloat *Q_i = Q->get_Q(i,l);
+			const Qfloat *Q_i_star = Q_star->get_Q(i,l);
+
+			true_i = active_set[i];
+			act_set_i = true_act_set_beta[true_i];
+
+			const Qfloat *Q_i_star_beta = Q_star_beta->get_Q(act_set_i,l);
+			G[i] = 0;
+			g[i] = g_init[i];
+			for(j=0;j<l;j++)
+			if(alpha[j]>1e-8) 
+			{
+				G[i] += alpha[j] * y[j] * Q_i[j];
+				g[i] += alpha[j] * Q_i_star[j];
+			}
+			for(j=0;j<l;j++)
+				if(beta[j]>1e-8) 
+					g[i] += beta[j] * Q_i_star_beta[j];
+		}
+	}
+
+	if(active_size_beta < l) 
+	{
+		for(i=active_size_beta;i<l;i++) 
+		{
+			const Qfloat *Q_i_star_beta = Q_star_beta->get_Q(i,l);
+
+			true_i = active_set_beta[i];
+			act_set_i = true_act_set[true_i];
+			const Qfloat *Q_i_star = Q_star->get_Q(act_set_i,l);
+
+			g_beta[i] = g_beta_init[i];
+
+			for(j=0;j<l;j++)
+				if(beta[j]>1e-8) 
+					g_beta[i] += beta[j] * Q_i_star_beta[j];
+
+			for(j=0;j<l;j++)
+				if(alpha[j]>1e-8) 
+					g_beta[i] += alpha[j] * Q_i_star[j];
+		}
 	}
 }
 
@@ -1151,9 +1268,304 @@ void Solver::Solve_w(int l, const QMatrix& Q, const double *p_, const schar *y_,
 	delete[] G_bar;
 }
 
+void Solver::Solve_plus(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
+			     double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
+			     SolutionInfo* si, int shrinking)
+{
+	int i,j;
+	this->l = l;
+	this->Q = &Q;
+	this->Q_star = &Q_star;
+	this->Q_star_beta = &Q_star_beta;
+	QD = Q.get_QD();
+	QD_star = Q_star.get_QD();
+	QD_star_beta = Q_star_beta.get_QD();	
+	clone(y, y_,l);
+	clone(alpha,alpha_,l);
+	clone(beta,beta_,l);
+	this->Cp = Cp;
+	this->Cn = Cn;
+	this->eps = eps;
+	tau = tau_;
+	unshrink = false;
+
+	{
+		alpha_status = new char[l];
+		for(i=0;i<l;i++)
+			update_alpha_status(i);
+	}
+
+	{
+		beta_status = new char[l];
+		for(i=0;i<l;i++)
+			update_beta_status(i);
+	}
+
+	{
+		// initialize gradient
+		G = new double[l];
+		g = new double[l];
+		g_beta = new double[l];
+		g_init = new double[l];
+		g_beta_init = new double[l];
+
+		for(i=0; i<l; i++) 
+		{
+			G[i] = 0;
+			g[i] = 0;
+			g_init[i] =0;
+		}
+
+		for(i=0;i<l;i++)
+		{
+			const Qfloat *Q_i_star = Q_star.get_Q(i,l);
+			for(j=0; j<l; j++) 
+			{
+				g[j] -= Cp*Q_i_star[j];
+				g_init[j] -= Cp*Q_i_star[j];
+			}
+
+			if(!is_lower_bound(i))
+			{
+				const Qfloat *Q_i = Q.get_Q(i,l);
+				double alpha_i = alpha[i];
+				double y_i = y[i];
+				for(j=0;j<l;j++)
+				{
+					G[j] += alpha_i*y_i*Q_i[j];
+					g[j] += alpha_i*Q_i_star[j];
+				}
+			}
+			if(!is_lower_bound_beta(i)) 
+			{
+				double beta_i = beta[i];
+				for(j=0;j<l;j++) 
+					g[j] += beta_i*Q_i_star[j];    
+			}
+		}
+
+		for(i=0; i<l; i++) {
+			g_beta[i] = g[i];
+			g_beta_init[i] = g_init[i];
+		}			
+	}
+
+	active_set = new int[l];
+	active_set_beta = new int[l];
+	true_act_set = new int[l];
+	true_act_set_beta = new int[l];
+
+	for(int i=0; i<l; i++) 
+	{
+		active_set[i] = i;
+		active_set_beta[i] = i;
+		true_act_set[i] = i;
+		true_act_set_beta[i] = i;
+	}
+	active_size = l;
+	active_size_beta = l;
+
+	int counter = min(l,1000)+1;
+
+	// optimization step
+	int iter = 0, y_i, y_j;
+	Qfloat *Q_i, *Q_j, *Q_i_star, *Q_j_star, *Q_k_star, *Q_i_star_beta, *Q_j_star_beta, *Q_k_star_beta;
+	double Delta, beta_i_old, beta_j_old, alpha_i_old, alpha_j_old, beta_k_old, nominator, denominator, min_alpha, alpha_change;
+	double diff_i, diff_j, diff_k, beta_i, beta_k, alpha_i, diff_i_y, diff_j_y;
+	int true_i, true_j, true_k, act_set_i, act_set_j, act_set_k;
+
+	while(iter<1e7) 
+	{
+		int i,j,k,set_type,r;
+
+		if(--counter == 0) 
+		{
+			counter = min(l,1000);
+			if(shrinking) 
+				do_shrinking_plus();
+		}
+
+		if(select_working_set_plus(set_type, i,j,k, iter) != 0) 
+		{
+			// reconstruct the whole gradient
+			reconstruct_gradient_plus();
+			// reset active set size and check
+			active_size = l;
+			active_size_beta = l;
+			
+			if(select_working_set_plus(set_type, i,j,k, iter) != 0)
+				break;
+			else
+				counter = 1;	// do shrinking next iteration
+		}
+
+		++iter;
+
+		switch(set_type)
+		{
+			case BETA_I_BETA_J: 
+				Q_i_star_beta = Q_star_beta.get_Q(i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(j,active_size_beta);
+				beta_i_old = beta[i];
+				beta_j_old = beta[j];
+				Delta = beta_i_old + beta_j_old;
+				beta[i] += (g_beta[j]-g_beta[i])/(Q_i_star_beta[i]+Q_j_star_beta[j]-2*Q_i_star_beta[j]);
+				beta_i = beta[i];
+				if (beta_i < 0)
+					beta[i] = 0;
+				if (beta_i > Delta)
+					beta[i] = Delta;
+					beta[j] = Delta - beta[i];
+
+				diff_i = beta[i]-beta_i_old;
+				diff_j = beta[j]-beta_j_old;
+				for(r=0; r<active_size_beta; r++) 
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]; 
+				
+				update_beta_status(i);
+				update_beta_status(j);
+				break;
+
+			case ALPHA_I_ALPHA_J:
+				Q_i = Q.get_Q(i,active_size);
+				Q_j = Q.get_Q(j,active_size);
+				Q_i_star = Q_star.get_Q(i,active_size);
+				Q_j_star = Q_star.get_Q(j,active_size);
+				alpha_i_old = alpha[i];
+				alpha_j_old = alpha[j];
+				y_i = y[i];
+				y_j = y[j];
+				Delta = alpha_i_old + alpha_j_old;
+				nominator = y_j*G[j]-y_i*G[i]+(g[j]-g[i])/tau;
+				denominator = Q_i[i]+Q_j[j]-2*Q_i[j]+(Q_i_star[i]+Q_j_star[j]-2*Q_i_star[j])/tau;
+				alpha[i] += nominator/denominator;
+				alpha_i = alpha[i];
+				if (alpha_i < 0)
+					alpha[i] = 0;
+				if (alpha_i > Delta)
+					alpha[i] = Delta;
+				alpha[j] = Delta - alpha[i];
+
+				diff_i = alpha[i]-alpha_i_old;
+				diff_j = alpha[j]-alpha_j_old;
+				diff_i_y = diff_i * y_i;
+				diff_j_y = diff_j * y_j;      
+				for (r=0; r<active_size; r++) 
+				{
+					G[r] += diff_i_y*Q_i[r]+diff_j_y*Q_j[r];
+					g[r] += diff_i*Q_i_star[r]+diff_j*Q_j_star[r]; 
+				}
+
+				true_i = active_set[i];
+				act_set_i = true_act_set_beta[true_i];
+				true_j = active_set[j];
+				act_set_j = true_act_set_beta[true_j];
+				Q_i_star_beta = Q_star_beta.get_Q(act_set_i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(act_set_j,active_size_beta);
+
+				for (r=0; r<active_size_beta; r++) 
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]; 
+
+				update_alpha_status(i);
+				update_alpha_status(j);
+				break;
+
+			case ALPHA_I_ALPHA_J_BETA_K:
+				Q_i = Q.get_Q(i,active_size);
+				Q_j = Q.get_Q(j,active_size);
+				Q_i_star = Q_star.get_Q(i,active_size);
+				Q_j_star = Q_star.get_Q(j,active_size);
+				Q_k_star_beta = Q_star_beta.get_Q(k,active_size_beta);
+
+				true_k = active_set_beta[k];
+				act_set_k = true_act_set[true_k];
+				Q_k_star = Q_star.get_Q(act_set_k, active_size);
+
+				alpha_i_old = alpha[i];
+				alpha_j_old = alpha[j];
+				beta_k_old = beta[k];
+				y_i = y[i];
+				y_j = y[j];
+				if(alpha_i_old < alpha_j_old)
+					min_alpha = alpha_i_old;
+				else
+					min_alpha = alpha_j_old;
+
+				Delta = beta_k_old + 2*min_alpha;
+				nominator = y[i]*G[i]+y[j]*G[j]-2+(g[i]+g[j]-2*g_beta[k])/tau;
+				denominator = Q_i[i]+Q_j[j]-2*Q_i[j]+(Q_i_star[i]+Q_j_star[j]+2*Q_i_star[j]-4*Q_k_star[i]-4*Q_k_star[j]+4*Q_k_star_beta[k])/tau;
+				beta[k] += 2*nominator/denominator;
+				beta_k = beta[k];
+				if (beta_k < 0)
+					beta[k] = 0;
+				if (beta_k > Delta)
+					beta[k] = Delta;
+				alpha_change = (beta_k_old-beta[k])/2;
+				alpha[i] += alpha_change;
+				alpha[j] += alpha_change;
+
+				diff_i = alpha[i]-alpha_i_old;
+				diff_j = alpha[j]-alpha_j_old;
+				diff_k = beta[k]-beta_k_old;
+				diff_i_y = diff_i * y_i;
+				diff_j_y = diff_j * y_j;
+
+				for (r=0; r<active_size; r++) 
+				{
+					G[r] += diff_i_y*Q_i[r]+diff_j_y*Q_j[r];
+					g[r] += diff_i*Q_i_star[r]+diff_j*Q_j_star[r]+diff_k*Q_k_star[r]; 
+				}
+
+				true_i = active_set[i];
+				act_set_i = true_act_set_beta[true_i];
+				true_j = active_set[j];
+				act_set_j = true_act_set_beta[true_j];
+				Q_i_star_beta = Q_star_beta.get_Q(act_set_i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(act_set_j,active_size_beta);
+
+				for(r=0; r<active_size_beta; r++)
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]+diff_k*Q_k_star_beta[r];
+
+				update_alpha_status(i);
+				update_alpha_status(j);
+				update_beta_status(k);
+					
+				break;
+		}
+	}
+
+	calculate_rho_plus(si->rho,si->rho_star);
+
+	// put back the solution
+	for(i=0;i<l;i++) {
+		alpha_[active_set[i]] = alpha[i];
+		beta_[active_set_beta[i]] = beta[i];
+	}
+		
+	si->upper_bound_p = Cp;
+	si->upper_bound_n = Cn;
+
+	info("\noptimization finished, #iter = %d\n",iter);
+
+	si->rho *= -1;
+
+	delete[] G;
+	delete[] g;
+	delete[] g_init;
+	delete[] g_beta;
+	delete[] g_beta_init;
+	delete[] alpha_status;
+	delete[] beta_status;
+	delete[] alpha;
+	delete[] beta;
+
+
+}
+
 // return 1 if already optimal, return 0 otherwise
 int Solver::select_working_set(int &out_i, int &out_j)
 {
+	
 	// return i,j such that
 	// i: maximizes -y_i * grad(f)_i, i in I_up(\alpha)
 	// j: minimizes the decrease of obj value
@@ -1251,6 +1663,242 @@ int Solver::select_working_set(int &out_i, int &out_j)
 	return 0;
 }
 
+// return 1 if already optimal, return 0 otherwise
+int Solver::select_working_set_plus(int& set_type, int& i_out, int& j_out, int& k_out, int iter)
+{
+  double gap[3];
+
+  for(int i=0; i <3; i++)
+    gap[i] = -1;
+
+  int i, j, best_B1=-1, best_B1B2=-1, best_A2=-1, best_A2A4=-1, best_A1=-1, best_A1A3=-1, i_ind, j_ind, k_ind;
+  int type_selected[3], selected_indices[3][3];
+  double max_B1=-1e20, min_B1B2=1e20, max_A2=-1e20, min_A2A4=1e20, max_A1=-1e20, min_A1A3=1e20;
+  double alpha_i, g_i, g_j, y_i, y_j, deriv_alpha_i, first_order_criterion;
+  double max_z[3], z, absolute_best_z, nominator, nominator_base, denominator_base, j_deriv, tau2, Q_star_ii;
+  int best_z_index[3], true_k, act_set_k;
+  Qfloat *Q_i, *Q_i_star, *Q_k_star, *Q_k_star_beta;
+  double deriv_alpha_i1, deriv_alpha_i2, nominator1, nominator2, nominator_base1, nominator_base2, j_deriv1, j_deriv2;  
+  double max_A2_1, max_A2_2, min_A2A4_1, min_A2A4_2, max_A1_1, max_A1_2, min_A1A3_1, min_A1A3_2;
+
+  // first-order working set selection 
+
+  // compute all maxima and minima related to alphas
+  for(i=0; i<active_size; i++) {
+    alpha_i = alpha[i];
+    g_i = g[i];
+    y_i = y[i];
+    deriv_alpha_i1 = y_i*G[i];
+    deriv_alpha_i2 = g_i;
+    deriv_alpha_i = deriv_alpha_i1+deriv_alpha_i2/tau;
+
+    // max A2
+    if(alpha_i>1e-8 && y_i==-1 && deriv_alpha_i>max_A2) {
+      max_A2 = deriv_alpha_i;
+      best_A2 = i;
+      max_A2_1 = deriv_alpha_i1;
+      max_A2_2 = deriv_alpha_i2;      
+    }
+
+    // min A2A4
+    if(y_i==-1 && deriv_alpha_i<min_A2A4) {
+      min_A2A4 = deriv_alpha_i;
+      best_A2A4 = i;
+      min_A2A4_1 = deriv_alpha_i1;
+      min_A2A4_2 = deriv_alpha_i2;      
+    }
+    
+    // max A1
+    if(alpha_i>1e-8 && y_i==1 && deriv_alpha_i>max_A1) {
+      max_A1 = deriv_alpha_i;
+      best_A1 = i;
+      max_A1_1 = deriv_alpha_i1;
+      max_A1_2 = deriv_alpha_i2;      
+    }
+    
+    // min A1A3
+    if(y_i==1 && deriv_alpha_i<min_A1A3) {
+      min_A1A3 = deriv_alpha_i;
+      best_A1A3 = i;
+      min_A1A3_1 = deriv_alpha_i1;
+      min_A1A3_2 = deriv_alpha_i2;      
+    } 
+  }
+
+  // compute all maxima and minima related to betas
+  for(i=0; i<active_size_beta; i++) {
+    g_i = g_beta[i];
+
+    // max B1
+    if(beta[i]>1e-8 && g_i>max_B1) {
+      max_B1 = g_i;
+      best_B1 = i;
+    }
+
+    // min B1B2
+    if(g_i<min_B1B2) {
+      min_B1B2 = g_i;
+      best_B1B2 = i;
+    }
+  }
+ 
+  max_B1 /= tau;
+  min_B1B2 /= tau;
+
+  // select maximal violating pairs
+  if(max_B1-min_B1B2 < eps)
+    type_selected[0] = 0;
+  else {
+    type_selected[0] = 1;
+    selected_indices[0][0] = best_B1;
+    selected_indices[0][1] = best_B1B2;
+    gap[0] = max_B1-min_B1B2;
+  }
+
+ if(((max_A2 - min_A2A4 < eps) || ((max_A2_1 - min_A2A4_1 < eps) && (max_A2_2 - min_A2A4_2 < eps))) &&
+     ((max_A1 - min_A1A3 < eps) || ((max_A1_1 - min_A1A3_1 < eps) && (max_A1_2 - min_A1A3_2 < eps))))
+    type_selected[1] = 0;
+  else {
+    if((max_A2 - min_A2A4 > max_A1 - min_A1A3) && ((max_A2_1 - min_A2A4_1 >= eps) || (max_A2_2 - min_A2A4_2 >= eps))) {
+      type_selected[1] = 1;
+      selected_indices[1][0] = best_A2;
+      selected_indices[1][1] = best_A2A4;
+    }
+    else {
+      if((max_A2 - min_A2A4 <= max_A1 - min_A1A3) && ((max_A1_1 - min_A1A3_1 >= eps) || (max_A1_2 - min_A1A3_2 >= eps))) {
+        type_selected[1] = 1;
+        selected_indices[1][0] = best_A1;
+        selected_indices[1][1] = best_A1A3;
+      }
+      else
+        type_selected[1] = 0;
+    }
+  }
+
+   if(((2*max_B1+2-min_A1A3-min_A2A4 < eps) || ((2-min_A1A3_1-min_A2A4_1<eps) && (2*max_B1*tau-min_A1A3_2-min_A2A4_2<eps))) &&
+     ((max_A1+max_A2-2*min_B1B2-2 < eps) || ((max_A1_1+max_A2_1-2<eps) && (max_A1_2+max_A2_2-2*min_B1B2*tau<eps))))
+    type_selected[2] = 0;
+  else {
+    if((2*max_B1+2-min_A1A3-min_A2A4 > max_A1+max_A2-2*min_B1B2-2) && ((2-min_A1A3_1-min_A2A4_1>=eps) || (2*max_B1*tau-min_A1A3_2-min_A2A4_2>=eps))) {
+      type_selected[2] = 1;
+      selected_indices[2][0] = best_A1A3;
+      selected_indices[2][1] = best_A2A4;
+      selected_indices[2][2] = best_B1;
+    }
+    else {
+      if((2*max_B1+2-min_A1A3-min_A2A4 <= max_A1+max_A2-2*min_B1B2-2) && ((max_A1_1+max_A2_1-2>=eps) || (max_A1_2+max_A2_2-2*min_B1B2*tau>=eps))) {
+        type_selected[2] = 1;
+        selected_indices[2][0] = best_A1;
+        selected_indices[2][1] = best_A2;
+        selected_indices[2][2] = best_B1B2;
+      }
+      else
+        type_selected[2] = 0;
+    }
+  }
+
+  if(type_selected[0]+type_selected[1]+type_selected[2] == 0) 
+    return 1;
+
+  for(i=0; i<3; i++)
+    max_z[i] = -1e20;    
+
+  // second-order working set selection
+  if(type_selected[0] == 1) {
+     i_ind = selected_indices[0][0];
+     g_i = g_beta[i_ind];
+     Q_i_star = Q_star_beta->get_Q(i_ind,active_size_beta);
+     Q_star_ii = Q_i_star[i_ind];
+     tau2 = 2*tau;
+     for(j = 0; j < active_size_beta; j++) {
+        g_j = g_beta[j];
+	if(eps+g_j/tau < g_i/tau) {
+	  nominator = g_i-g_j;
+	  z = nominator*nominator/(tau2*(Q_star_ii+QD_star_beta[j]-2*Q_i_star[j]));
+	  if(z > max_z[0]) {
+	    max_z[0] = z;
+	    best_z_index[0] = j;
+	  }
+	}
+      }
+  }
+
+  if(type_selected[1] == 1) {
+     i_ind = selected_indices[1][0];
+     y_i = y[i_ind];
+     Q_i = Q->get_Q(i_ind,active_size);
+     Q_i_star = Q_star->get_Q(i_ind,active_size);
+     nominator_base = y_i*G[i_ind] + g[i_ind]/tau;
+      nominator_base1 = y_i*G[i_ind];
+     nominator_base2 = g[i_ind];
+     denominator_base = 2*(Q_i[i_ind]+Q_i_star[i_ind]/tau);
+   
+     for(j = 0; j < active_size; j++) { 
+        y_j = y[j];
+        j_deriv = y_j*G[j]+g[j]/tau;
+         j_deriv1 = y_j*G[j];
+        j_deriv2 = g[j];
+
+        if(y_j == y_i && j_deriv+eps < nominator_base && ((j_deriv1+eps < nominator_base1) || (j_deriv2+eps < nominator_base2))) {
+	  nominator = nominator_base-j_deriv;
+	  z = nominator*nominator/(denominator_base + 2*(QD[j]-2*Q_i[j]+(QD_star[j]-2*Q_i_star[j])/tau));
+	  if(z > max_z[1]) {
+	    max_z[1] = z;
+	    best_z_index[1] = j;
+	  }
+	}
+    }
+  }
+
+  if(type_selected[2] == 1) {
+    i_ind = selected_indices[2][0];
+    j_ind = selected_indices[2][1];
+    k_ind = selected_indices[2][2];
+    Q_i = Q->get_Q(i_ind,active_size);
+    Q_i_star = Q_star->get_Q(i_ind,active_size);
+    Q_k_star_beta = Q_star_beta->get_Q(k_ind,active_size_beta);
+
+    true_k = active_set_beta[k_ind];
+    act_set_k = true_act_set[true_k];
+    Q_k_star = Q_star->get_Q(act_set_k, active_size);
+
+    nominator_base = y[i_ind]*G[i_ind]-2+(g[i_ind]-2*g_beta[k_ind])/tau;
+      nominator_base1 = y[i_ind]*G[i_ind]-2;
+    nominator_base2 = g[i_ind]-2*g_beta[k_ind];
+    denominator_base = 2*(Q_i[i_ind]+(Q_i_star[i_ind]-4*Q_k_star[i_ind]+4*Q_k_star_beta[k_ind])/tau);
+    first_order_criterion = nominator_base+y[j_ind]*G[j_ind]+g[j_ind]/tau;
+    for(j = 0; j < active_size; j++) 
+      if(y[j] == -1) {
+         nominator1 = nominator_base1+y[j]*G[j];
+        nominator2 = nominator_base2+g[j];
+        nominator = nominator_base+y[j]*G[j]+g[j]/tau;
+        if((first_order_criterion < 0 && nominator<-eps && ((nominator1 < -eps) || (nominator2 < -eps))) ||
+           (first_order_criterion > 0 && alpha[j] > 1e-8 && nominator > eps && ((nominator1 > eps) || (nominator2 > eps)))) {
+	  z = nominator*nominator/(denominator_base + 2*(QD[j]-2*Q_i[j]+(QD_star[j]+2*Q_i_star[j]-4*Q_k_star[j])/tau));
+	  if(z > max_z[2]) {
+	    max_z[2] = z;
+	    best_z_index[2] = j;
+	  }
+        }
+      }
+  }
+
+  // choose the best type
+  absolute_best_z = -1;
+  for(i=0; i<3; i++)
+    if((type_selected[i] == 1) && (max_z[i] > absolute_best_z)) {  
+      absolute_best_z = max_z[i];
+      set_type = i;
+      i_out = selected_indices[i][0];
+      j_out = best_z_index[i];
+      if(i == 2)
+	k_out = selected_indices[i][2];
+    }
+
+  return 0;
+}
+
+
 bool Solver::be_shrunk(int i, double Gmax1, double Gmax2)
 {
 	if(is_upper_bound(i))
@@ -1269,6 +1917,39 @@ bool Solver::be_shrunk(int i, double Gmax1, double Gmax2)
 	}
 	else
 		return(false);
+}
+
+bool Solver::be_shrunk_alpha(int i, double max_B1, double max_A1, double max_A2, double min_B1B2, double min_A1A3, double min_A2A4)
+{
+  int y_i = y[i];
+  double deriv_i = y_i*G[i]+g[i]/tau;
+
+  if(alpha[i]<=1e-8) {
+    if(y_i == 1 && deriv_i <= max_A1+eps)
+      return false;
+    if(y_i == -1 && deriv_i <= max_A2+eps)
+      return false;
+    return deriv_i+min_A1A3+eps>2*max_B1+2;
+  }
+  else {
+    if(y_i == 1) 
+      return max_A1-deriv_i<eps && deriv_i-min_A1A3<eps && 2*max_B1+2-deriv_i-min_A2A4<eps && deriv_i+max_A2-2*min_B1B2-2<eps; 
+    else 
+      return max_A2-deriv_i<eps && deriv_i-min_A2A4<eps && 2*max_B1+2-min_A1A3-deriv_i<eps && max_A1+deriv_i-2*min_B1B2-2<eps;
+  }
+
+}
+
+bool Solver::be_shrunk_beta(int i, double max_B1, double max_A1, double max_A2, double min_B1B2, double min_A1A3, double min_A2A4)
+{
+  double g_beta_i = g_beta[i]/tau;
+
+  if(beta[i]<=1e-8) 
+    return (g_beta_i +eps> max_B1 && 2*g_beta_i+2 + eps > max_A1 + max_A2);
+  else 
+    return (g_beta_i-min_B1B2<eps && max_B1-g_beta_i<eps && 
+            2*g_beta_i+2-min_A1A3-min_A2A4<eps && max_A1+max_A2-2*g_beta_i-2<eps);
+
 }
 
 void Solver::do_shrinking()
@@ -1331,6 +2012,91 @@ void Solver::do_shrinking()
 			}
 		}
 }
+void Solver::do_shrinking_plus() 
+{
+  int i, y_i;
+  double g_i, alpha_i, deriv_alpha_i;
+  double max_B1=-1e20, min_B1B2=1e20, max_A2=-1e20, min_A2A4=1e20, max_A1=-1e20, min_A1A3=1e20;
+
+  // compute all maxima and minima related to alphas
+  for(i=0; i<active_size; i++) {
+    alpha_i = alpha[i];
+    g_i = g[i];
+    y_i = y[i];
+    deriv_alpha_i = y_i*G[i]+g_i/tau;
+
+    // max A2
+    if(alpha_i>1e-8 && y_i==-1 && deriv_alpha_i>max_A2) 
+      max_A2 = deriv_alpha_i;
+
+    // min A2A4
+    if(y_i==-1 && deriv_alpha_i<min_A2A4) 
+      min_A2A4 = deriv_alpha_i;
+    
+    // max A1
+    if(alpha_i>1e-8 && y_i==1 && deriv_alpha_i>max_A1) 
+      max_A1 = deriv_alpha_i;
+    
+    // min A1A3max_A2, min_A2A4, max_A1, min_A1A3
+    if(y_i==1 && deriv_alpha_i<min_A1A3) 
+      min_A1A3 = deriv_alpha_i;
+  }
+
+  // compute all maxima and minima related to betas
+  for(i=0; i<active_size_beta; i++) {
+    g_i = g_beta[i];
+
+    // max B1
+    if(beta[i]>1e-8 && g_i>max_B1) 
+      max_B1 = g_i;
+
+    // min B1B2
+    if(g_i<min_B1B2) 
+      min_B1B2 = g_i;
+  }
+
+  if(unshrink == false && max_B1-min_B1B2 < eps*10 &&
+     max_A2-min_A2A4 < eps*10 && max_A1 - min_A1A3 < eps*10 &&
+     2*max_B1+2-min_A1A3-min_A2A4 < eps*10 && max_A1+max_A2-2*min_B1B2-2 < eps*10) {
+    unshrink = true;
+    reconstruct_gradient_plus();
+    active_size = l;
+    active_size_beta = l;
+  }
+
+  if(active_size_beta > 2) {
+    for(i=0;i<active_size_beta;i++) {
+      if(active_size_beta <= 2)
+	break;
+      if (be_shrunk_beta(i, max_B1, max_A1, max_A2, min_B1B2, min_A1A3, min_A2A4)) {
+	active_size_beta--;
+	while (active_size_beta > i) {
+	  if (!be_shrunk_beta(active_size_beta, max_B1, max_A1, max_A2, min_B1B2, min_A1A3, min_A2A4)) {
+	    swap_index_beta(i,active_size_beta);
+	    break;
+	  }
+	  active_size_beta--;
+	  if(active_size_beta <= 2)
+	    break;
+	}
+      }
+    }
+  }
+
+  for(i=0;i<active_size;i++) {
+    if (be_shrunk_alpha(i, max_B1, max_A1, max_A2, min_B1B2, min_A1A3, min_A2A4)) {
+      active_size--;
+      while (active_size > i) {
+	if (!be_shrunk_alpha(active_size, max_B1, max_A1, max_A2, min_B1B2, min_A1A3, min_A2A4)) {
+	  swap_index_alpha(i,active_size);
+	  break;
+	}
+	active_size--;
+      }
+    }
+  }
+}
+
 
 double Solver::calculate_rho()
 {
@@ -1368,6 +2134,34 @@ double Solver::calculate_rho()
 		r = (ub+lb)/2;
 
 	return r;
+}
+
+void Solver::calculate_rho_plus(double& rho, double& rho_star)
+{
+  int i, pos_size=0, neg_size=0;
+  double pos_sum = 0, neg_sum = 0;
+
+  for(i=0; i < active_size; i++)
+    if(alpha[i]>1e-8) {
+      if(y[i]==1) {
+        pos_size++;
+        pos_sum += 1-G[i]-g[i]/tau; 
+      }
+      else {
+        neg_size++;
+        neg_sum += -1-G[i]+g[i]/tau;
+      }
+    }
+
+  if(pos_size != 0)
+    pos_sum /= pos_size;
+
+  if(neg_size != 0)
+    neg_sum /= neg_size;
+
+  rho = (pos_sum+neg_sum)/2;
+  rho_star = pos_sum - rho; 
+   
 }
 
 //
@@ -1892,8 +2686,63 @@ static void solve_w_svm(
 static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
 			   double *alpha, double *beta, Solver::SolutionInfo* si, double Cp, double Cn)
 {
- 
+	int l = prob->l;
+	schar *y = new schar[l];
+	schar *y_true = new schar[l];
+	svm_parameter cheat_param, cheat_param2; 
+	svm_problem cheat_problem, cheat_problem2;
+	int i;
+	int l_pos=0, l_neg=0;
 
+	// initialize alphas and betas
+	for(i=0;i<l;i++) 
+	{
+		alpha[i] = 0;
+		beta[i] = Cp; 
+		y[i] = 1;
+		if(prob->y[i] > 0) 
+		{ 
+			y_true[i] = +1; 
+			l_pos++;
+		}
+		else 
+		{
+			y_true[i]=-1;
+			l_neg++;
+		}
+	}
+
+	cheat_param = *param;
+	cheat_param.kernel_type = 2;
+	cheat_param.gamma = param->gamma_star;
+	cheat_problem = *prob;
+	cheat_problem.x = Malloc(struct svm_node*,prob->l);
+	memcpy(cheat_problem.x, prob->x_star, l*sizeof(struct svm_node*));
+	cheat_param2 = *param;
+	cheat_param2.kernel_type = 2;
+	cheat_param2.gamma = param->gamma_star;
+	cheat_problem2 = *prob;
+	cheat_problem2.x = Malloc(struct svm_node*,prob->l);
+	memcpy(cheat_problem2.x, prob->x_star, l*sizeof(struct svm_node*));
+
+
+	SVC_Q kernel1 = SVC_Q(*prob,*param,y);
+	SVC_Q kernel2 = SVC_Q(cheat_problem, cheat_param, y);
+	SVC_Q kernel3 = SVC_Q(cheat_problem2, cheat_param2, y);
+
+	Solver s;
+    s.Solve_plus(l, kernel1, kernel2, kernel3, y_true,
+		 alpha, beta, Cp, Cn, param->tau, param->eps, si, param->shrinking);
+
+	// produce the same output as SVM
+	for(i=0;i<l;i++) { 
+		if(alpha[i]<0)
+			alpha[i] = 0;
+		alpha[i] *= y_true[i];
+	}
+
+	delete[] y;
+	delete[] y_true;
 }
 
 

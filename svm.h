@@ -25,6 +25,7 @@ struct svm_problem
 
 enum { C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR, W_SVM, SVM_PLUS };	/* svm_type */
 enum { LINEAR, POLY, RBF, SIGMOID, PRECOMPUTED }; /* kernel_type */
+enum { BETA_I_BETA_J, ALPHA_I_ALPHA_J, ALPHA_I_ALPHA_J_BETA_K}; 
 
 struct svm_parameter
 {
@@ -32,6 +33,7 @@ struct svm_parameter
 	int kernel_type;
 	int degree;	/* for poly */
 	double gamma;	/* for poly/rbf/sigmoid */
+	double gamma_star;	/* for poly/rbf/sigmoid */
 	double coef0;	/* for poly/sigmoid */
 
 	/* these are for training only */
@@ -45,6 +47,8 @@ struct svm_parameter
 	double p;	/* for EPSILON_SVR */
 	int shrinking;	/* use the shrinking heuristics */
 	int probability; /* do probability estimates */
+
+	double tau; /* for SVM_PLUS */
 	char transfer_file_name[1024];
 };
 
