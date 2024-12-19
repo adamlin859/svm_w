@@ -28,11 +28,15 @@ void exit_with_help()
 	"	2 -- radial basis function: exp(-gamma*|u-v|^2)\n"
 	"	3 -- sigmoid: tanh(gamma*u'*v + coef0)\n"
 	"	4 -- precomputed kernel (kernel values in training_set_file)\n"
+	"-T kernel_type_star : set type of kernel function for the correcting space (default 2), for SVM+\n"
 	"-f transfer_file : set the transfer file for w-SVM\n"
+	"-l star_file : name of the file containing star examples. Necessary parameter for SVM+ \n"
 	"-d degree : set degree in kernel function (default 3)\n"
 	"-g gamma : set gamma in kernel function (default 1/num_features)\n"
+	"-G gamma_star : set gamma_star in kernel function in the correcting space (default 1/number of features in the  correcting space)\n"
 	"-r coef0 : set coef0 in kernel function (default 0)\n"
 	"-c cost : set the parameter C of C-SVC, epsilon-SVR, and nu-SVR (default 1)\n"
+	"-C tau : set the parameter tau in SVM+ (default 1)\n"
 	"-n nu : set the parameter nu of nu-SVC, one-class SVM, and nu-SVR (default 0.5)\n"
 	"-p epsilon : set the epsilon in loss function of epsilon-SVR (default 0.1)\n"
 	"-m cachesize : set cache memory size in MB (default 100)\n"
@@ -52,7 +56,7 @@ void exit_input_error(int line_num)
 	exit(1);
 }
 
-void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name);
+void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name, char *input_file_name_star);
 void read_problem(const char *filename);
 void read_problem_star(const char *filename);
 void do_cross_validation();
@@ -89,21 +93,25 @@ static char* readline(FILE *input)
 
 int main(int argc, char **argv)
 {
+
 	char input_file_name[1024];
 	char input_file_name_star[1024];
 	char model_file_name[1024];
 	char transfer_file_name[1024];
 	const char *error_msg;
-
-	parse_command_line(argc, argv, input_file_name, model_file_name, transfer_file_name);
-	read_problem(input_file_name);
 	
+	
+	parse_command_line(argc, argv, input_file_name, model_file_name, transfer_file_name, input_file_name_star);
+	
+	read_problem(input_file_name);
+
 	if (param.svm_type == SVM_PLUS)
 	{
 		read_problem_star(input_file_name_star);
+		prob.x_star = prob_star.x;
 	}
+
 	error_msg = svm_check_parameter(&prob,&param);
-	
 
 	if(error_msg)
 	{
@@ -176,7 +184,7 @@ void do_cross_validation()
 	free(target);
 }
 
-void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name)
+void parse_command_line(int argc, char **argv, char *input_file_name, char *model_file_name, char *transfer_file_name, char *input_file_name_star)
 {
 	int i;
 	void (*print_func)(const char*) = NULL;	// default printing to stdout
@@ -184,12 +192,15 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	// default values
 	param.svm_type = C_SVC;
 	param.kernel_type = RBF;
+	param.kernel_type_star = RBF;
 	param.degree = 3;
 	param.gamma = 0;	// 1/num_features
+	param.gamma_star = 0; // 1/k
 	param.coef0 = 0;
 	param.nu = 0.5;
 	param.cache_size = 100;
 	param.C = 1;
+	param.tau = 0;
 	param.eps = 1e-3;
 	param.p = 0.1;
 	param.shrinking = 1;
@@ -199,6 +210,7 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	param.weight = NULL;
 	cross_validation = 0;
 	transfer_file_name[0] = '\0';
+	input_file_name_star[0] = '\0';
 
 	// parse options
 	for(i=1;i<argc;i++)
@@ -214,11 +226,17 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 			case 't':
 				param.kernel_type = atoi(argv[i]);
 				break;
+			case 'T':
+				param.kernel_type_star = atoi(argv[i]);
+				break;
 			case 'd':
 				param.degree = atoi(argv[i]);
 				break;
 			case 'g':
 				param.gamma = atof(argv[i]);
+				break;
+			case 'G':
+				param.gamma_star = atof(argv[i]);
 				break;
 			case 'r':
 				param.coef0 = atof(argv[i]);
@@ -231,6 +249,9 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 				break;
 			case 'c':
 				param.C = atof(argv[i]);
+				break;
+			case 'C':
+				param.tau = atof(argv[i]);
 				break;
 			case 'e':
 				param.eps = atof(argv[i]);
@@ -267,19 +288,29 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 			case 'f':
 				strcpy(transfer_file_name, argv[i]);
 				break;
+			case 'l': 
+				strcpy(input_file_name_star, argv[i]);
+				break;
 			default:
 				fprintf(stderr,"Unknown option: -%c\n", argv[i-1][1]);
 				exit_with_help();
 		}
 	}
 
+
 	svm_set_print_string_function(print_func);
 
 	// determine filenames
+
 	if ((param.svm_type == W_SVM) && (transfer_file_name[0] == '\0'))
 		exit_with_help();
 	
 	strcpy(param.transfer_file_name, transfer_file_name);
+
+
+	
+	if((param.svm_type == SVM_PLUS || param.svm_type == SVM_PLUS) && input_file_name_star[0] == '\0')
+		exit_with_help();
 
 	if(i>=argc)
 		exit_with_help();
@@ -490,10 +521,10 @@ void read_problem_star(const char *filename)
 		x_space_star[j++].index = -1;
 	}
 
-	if(param.gamma == 0 && max_index > 0)
-		param.gamma = 1.0/max_index;
+	if(param.gamma_star == 0 && max_index > 0)
+		param.gamma_star = 1.0/max_index;
 
-	if(param.kernel_type == PRECOMPUTED)
+	if(param.kernel_type_star == PRECOMPUTED)
 		for(i=0;i<prob_star.l;i++)
 		{
 			if (prob_star.x[i][0].index != 0)

@@ -33,7 +33,6 @@ struct svm_parameter
 	int kernel_type;
 	int degree;	/* for poly */
 	double gamma;	/* for poly/rbf/sigmoid */
-	double gamma_star;	/* for poly/rbf/sigmoid */
 	double coef0;	/* for poly/sigmoid */
 
 	/* these are for training only */
@@ -50,6 +49,10 @@ struct svm_parameter
 
 	double tau; /* for SVM_PLUS */
 	char transfer_file_name[1024];
+	int kernel_type_star;
+	double gamma_star;	/* for poly/rbf/sigmoid in the correcting space */
+  
+
 };
 
 //

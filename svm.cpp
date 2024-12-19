@@ -1,3 +1,4 @@
+#include <iostream>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2718,6 +2719,9 @@ static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
 	cheat_problem = *prob;
 	cheat_problem.x = Malloc(struct svm_node*,prob->l);
 	memcpy(cheat_problem.x, prob->x_star, l*sizeof(struct svm_node*));
+
+
+
 	cheat_param2 = *param;
 	cheat_param2.kernel_type = 2;
 	cheat_param2.gamma = param->gamma_star;
@@ -2725,12 +2729,11 @@ static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
 	cheat_problem2.x = Malloc(struct svm_node*,prob->l);
 	memcpy(cheat_problem2.x, prob->x_star, l*sizeof(struct svm_node*));
 
-
 	SVC_Q kernel1 = SVC_Q(*prob,*param,y);
 	SVC_Q kernel2 = SVC_Q(cheat_problem, cheat_param, y);
 	SVC_Q kernel3 = SVC_Q(cheat_problem2, cheat_param2, y);
-
 	Solver s;
+	
     s.Solve_plus(l, kernel1, kernel2, kernel3, y_true,
 		 alpha, beta, Cp, Cn, param->tau, param->eps, si, param->shrinking);
 
@@ -3474,6 +3477,7 @@ static void svm_group_classes(const svm_problem *prob, int *nr_class_ret, int **
 //
 svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 {
+	
 	svm_model *model = Malloc(svm_model,1);
 	model->param = *param;
 	model->free_sv = 0;	// XXX
@@ -3490,6 +3494,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		model->prob_density_marks = NULL;
 		model->sv_coef = Malloc(double *,1);
 
+		
 		decision_function f = svm_train_one(prob,param,0,0);
 		model->rho = Malloc(double,1);
 		model->rho[0] = f.rho;
@@ -3551,10 +3556,20 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		svm_node **x_star = NULL;
 		int i;
 		for(i=0;i<l;i++)
+		{
 			x[i] = prob->x[perm[i]];
+			// print x[i]->value
+			// std::cout << x[i]->value << std::endl;
+		}
+
+		if(param->svm_type == SVM_PLUS)
+		{
+			x_star = Malloc(svm_node *,l);
+			for(i=0;i<l;i++)
+				x_star[i] = prob->x_star[perm[i]];
+		}
 
 		// calculate weighted C
-
 		double *weighted_C = Malloc(double, nr_class);
 		for(i=0;i<nr_class;i++)
 			weighted_C[i] = param->C;
@@ -3571,7 +3586,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		}
 
 		// train k*(k-1)/2 models
-
+		
 		bool *nonzero = Malloc(bool,l);
 		bool *nonzero_star = Malloc(bool,l);
 		for(i=0;i<l;i++) 
@@ -3581,7 +3596,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		}
 			
 		decision_function *f = Malloc(decision_function,nr_class*(nr_class-1)/2);
-
+		
 		double *probA=NULL,*probB=NULL;
 		if (param->probability)
 		{
@@ -3614,12 +3629,12 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 					sub_prob.x[ci+k] = x[sj+k];
 					sub_prob.y[ci+k] = -1;
 					if(param->svm_type == SVM_PLUS)
-		  				sub_prob.x_star[k] = x_star[sj+k];					
+		  				sub_prob.x_star[ci+k] = x_star[sj+k];					
 				}
 
 				if(param->probability)
 					svm_binary_svc_probability(&sub_prob,param,weighted_C[i],weighted_C[j],probA[p],probB[p]);
-
+				
 				f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 
 				for(k=0;k<ci;k++) 
@@ -4682,7 +4697,8 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 	   svm_type != ONE_CLASS &&
 	   svm_type != EPSILON_SVR &&
 	   svm_type != NU_SVR && 
-	   svm_type != W_SVM)
+	   svm_type != W_SVM &&
+	   svm_type != SVM_PLUS)
 		return "unknown svm type";
 
 	// kernel_type, degree
@@ -4711,6 +4727,7 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 		return "eps <= 0";
 
 	if(svm_type == C_SVC ||
+	   svm_type == SVM_PLUS ||
 	   svm_type == EPSILON_SVR ||
 	   svm_type == NU_SVR)
 		if(param->C <= 0)
@@ -4721,6 +4738,11 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 	   svm_type == NU_SVR)
 		if(param->nu <= 0 || param->nu > 1)
 			return "nu <= 0 or nu > 1";
+
+	if(svm_type == SVM_PLUS)
+		if(param->tau <= 0)
+			return "tau <= 0";
+
 
 	if(svm_type == EPSILON_SVR)
 		if(param->p < 0)
@@ -4787,7 +4809,7 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 		free(label);
 		free(count);
 	}
-
+	
 	return NULL;
 }
 
