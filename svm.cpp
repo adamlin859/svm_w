@@ -420,7 +420,7 @@ public:
 			SolutionInfo* si, int shrinking);
 	void Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
 			double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
-			SolutionInfo* si, int shrinking, svm_model *model);
+			SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob);
 protected:
 	int active_size;
 	schar *y;
@@ -483,6 +483,7 @@ protected:
 	void reconstruct_gradient();
 	void reconstruct_gradient_w();
 	void reconstruct_gradient_plus();
+	void reconstruct_gradient_plus_w();
 	virtual int select_working_set(int &i, int &j);
 	virtual double calculate_rho();
 	virtual void do_shrinking();
@@ -650,6 +651,61 @@ void Solver::reconstruct_gradient_plus()
 				G[i] += alpha[j] * y[j] * Q_i[j];
 				g[i] += alpha[j] * Q_i_star[j];
 			}
+			for(j=0;j<l;j++)
+				if(beta[j]>1e-8) 
+					g[i] += beta[j] * Q_i_star_beta[j];
+		}
+	}
+
+	if(active_size_beta < l) 
+	{
+		for(i=active_size_beta;i<l;i++) 
+		{
+			const Qfloat *Q_i_star_beta = Q_star_beta->get_Q(i,l);
+
+			true_i = active_set_beta[i];
+			act_set_i = true_act_set[true_i];
+			const Qfloat *Q_i_star = Q_star->get_Q(act_set_i,l);
+
+			g_beta[i] = g_beta_init[i];
+
+			for(j=0;j<l;j++)
+				if(beta[j]>1e-8) 
+					g_beta[i] += beta[j] * Q_i_star_beta[j];
+
+			for(j=0;j<l;j++)
+				if(alpha[j]>1e-8) 
+					g_beta[i] += alpha[j] * Q_i_star[j];
+		}
+	}
+}
+
+void Solver::reconstruct_gradient_plus_w()
+{
+	int i, j, true_i, act_set_i;
+
+	if(active_size < l) 
+	{
+		for(i=active_size;i<l;i++) {
+			const Qfloat *Q_i = Q->get_Q(i,l);
+			const Qfloat *Q_i_star = Q_star->get_Q(i,l);
+
+			true_i = active_set[i];
+			act_set_i = true_act_set_beta[true_i];
+
+			const Qfloat *Q_i_star_beta = Q_star_beta->get_Q(act_set_i,l);
+			G[i] = 0;
+			g[i] = g_init[i];
+			for(j=0;j<l;j++)
+			{
+				if(alpha[j]>1e-8) 
+				{
+					G[i] += alpha[j] * y[j] * Q_i[j];
+					g[i] += alpha[j] * Q_i_star[j];
+				}
+			}
+			G[i] += G_w[i];
+
 			for(j=0;j<l;j++)
 				if(beta[j]>1e-8) 
 					g[i] += beta[j] * Q_i_star_beta[j];
@@ -1568,7 +1624,7 @@ void Solver::Solve_plus(int l, const QMatrix& Q, const QMatrix& Q_star, const QM
 
 void Solver::Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
 			     double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
-			     SolutionInfo* si, int shrinking, svm_model *model)
+			     SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob)
 {
 	int i,j;
 	this->l = l;
@@ -1646,7 +1702,26 @@ void Solver::Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const
 		for(i=0; i<l; i++) {
 			g_beta[i] = g[i];
 			g_beta_init[i] = g_init[i];
-		}			
+		}		
+
+		for (i = 0; i < l; i++) 
+		{
+			double *sv_coef = model->sv_coef[0];
+			double sum = 0;
+			int j;
+
+#ifdef _OPENMP
+#pragma omp parallel for private(j) reduction(+:sum) schedule(guided)
+#endif
+			for(j=0;j<model->l;j++)
+			{
+				sum += y[i] * sv_coef[j] * Kernel::k_function(prob.x[i],model->SV[j],model->param);
+			}
+			// print G[i] and sum
+			G_w[i] = sum;
+			G[i] += G_w[i]; 
+		}
+	
 	}
 
 	active_set = new int[l];
@@ -1687,7 +1762,7 @@ void Solver::Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const
 		if(select_working_set_plus(set_type, i,j,k, iter) != 0) 
 		{
 			// reconstruct the whole gradient
-			reconstruct_gradient_plus();
+			reconstruct_gradient_plus_w();
 			// reset active set size and check
 			active_size = l;
 			active_size_beta = l;
@@ -3101,7 +3176,7 @@ static void solve_svm_plus_tl(const svm_problem *prob, const svm_parameter* para
 	Solver s;
 	
     s.Solve_plus_tl(l, kernel1, kernel2, kernel3, y_true,
-		 alpha, beta, Cp, Cn, param->tau, param->eps, si, param->shrinking, model);
+		 alpha, beta, Cp, Cn, param->tau, param->eps, si, param->shrinking, model, *prob);
 
 	// produce the same output as SVM
 	for(i=0;i<l;i++) { 
@@ -4395,7 +4470,7 @@ double svm_predict_values(const svm_model *model, const svm_node *x, double* dec
 		else
 			return sum;
 	}
-	else if(model->param.svm_type == W_SVM)
+	else if(model->param.svm_type == W_SVM || model->param.svm_type == SVM_PLUS_TL)
 	{
 		
 		int nr_class = model->nr_class;
