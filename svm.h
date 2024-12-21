@@ -23,7 +23,7 @@ struct svm_problem
 	struct svm_node **x_star;
 };
 
-enum { C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR, W_SVM, SVM_PLUS };	/* svm_type */
+enum { C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR, W_SVM, SVM_PLUS, SVM_PLUS_TL };	/* svm_type */
 enum { LINEAR, POLY, RBF, SIGMOID, PRECOMPUTED }; /* kernel_type */
 enum { BETA_I_BETA_J, ALPHA_I_ALPHA_J, ALPHA_I_ALPHA_J_BETA_K}; 
 

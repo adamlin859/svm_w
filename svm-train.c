@@ -105,7 +105,7 @@ int main(int argc, char **argv)
 	
 	read_problem(input_file_name);
 
-	if (param.svm_type == SVM_PLUS)
+	if (param.svm_type == SVM_PLUS || param.svm_type == SVM_PLUS_TL)
 	{
 		read_problem_star(input_file_name_star);
 		prob.x_star = prob_star.x;
@@ -125,7 +125,9 @@ int main(int argc, char **argv)
 	}
 	else
 	{
+		
 		model = svm_train(&prob,&param);
+
 		if(svm_save_model(model_file_name,model))
 		{
 			fprintf(stderr, "can't save model to file %s\n", model_file_name);
@@ -302,14 +304,14 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 
 	// determine filenames
 
-	if ((param.svm_type == W_SVM) && (transfer_file_name[0] == '\0'))
+	if ((param.svm_type == W_SVM || param.svm_type == SVM_PLUS_TL) && (transfer_file_name[0] == '\0'))
 		exit_with_help();
 	
 	strcpy(param.transfer_file_name, transfer_file_name);
 
 
 	
-	if((param.svm_type == SVM_PLUS || param.svm_type == SVM_PLUS) && input_file_name_star[0] == '\0')
+	if((param.svm_type == SVM_PLUS || param.svm_type == SVM_PLUS_TL) && input_file_name_star[0] == '\0')
 		exit_with_help();
 
 	if(i>=argc)

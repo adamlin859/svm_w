@@ -416,8 +416,11 @@ public:
 		   double *alpha_, double Cp, double Cn, double eps,
 		   SolutionInfo* si, int shrinking, svm_model *model, const svm_problem& prob);
 	void Solve_plus(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
-			     double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
-			     SolutionInfo* si, int shrinking);
+			double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
+			SolutionInfo* si, int shrinking);
+	void Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
+			double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
+			SolutionInfo* si, int shrinking, svm_model *model);
 protected:
 	int active_size;
 	schar *y;
@@ -1305,6 +1308,301 @@ void Solver::Solve_plus(int l, const QMatrix& Q, const QMatrix& Q_star, const QM
 	{
 		// initialize gradient
 		G = new double[l];
+		g = new double[l];
+		g_beta = new double[l];
+		g_init = new double[l];
+		g_beta_init = new double[l];
+
+		for(i=0; i<l; i++) 
+		{
+			G[i] = 0;
+			g[i] = 0;
+			g_init[i] =0;
+		}
+
+		for(i=0;i<l;i++)
+		{
+			const Qfloat *Q_i_star = Q_star.get_Q(i,l);
+			for(j=0; j<l; j++) 
+			{
+				g[j] -= Cp*Q_i_star[j];
+				g_init[j] -= Cp*Q_i_star[j];
+			}
+
+			if(!is_lower_bound(i))
+			{
+				const Qfloat *Q_i = Q.get_Q(i,l);
+				double alpha_i = alpha[i];
+				double y_i = y[i];
+				for(j=0;j<l;j++)
+				{
+					G[j] += alpha_i*y_i*Q_i[j];
+					g[j] += alpha_i*Q_i_star[j];
+				}
+			}
+			if(!is_lower_bound_beta(i)) 
+			{
+				double beta_i = beta[i];
+				for(j=0;j<l;j++) 
+					g[j] += beta_i*Q_i_star[j];    
+			}
+		}
+
+		for(i=0; i<l; i++) {
+			g_beta[i] = g[i];
+			g_beta_init[i] = g_init[i];
+		}			
+	}
+
+	active_set = new int[l];
+	active_set_beta = new int[l];
+	true_act_set = new int[l];
+	true_act_set_beta = new int[l];
+
+	for(int i=0; i<l; i++) 
+	{
+		active_set[i] = i;
+		active_set_beta[i] = i;
+		true_act_set[i] = i;
+		true_act_set_beta[i] = i;
+	}
+	active_size = l;
+	active_size_beta = l;
+
+	int counter = min(l,1000)+1;
+
+	// optimization step
+	int iter = 0, y_i, y_j;
+	Qfloat *Q_i, *Q_j, *Q_i_star, *Q_j_star, *Q_k_star, *Q_i_star_beta, *Q_j_star_beta, *Q_k_star_beta;
+	double Delta, beta_i_old, beta_j_old, alpha_i_old, alpha_j_old, beta_k_old, nominator, denominator, min_alpha, alpha_change;
+	double diff_i, diff_j, diff_k, beta_i, beta_k, alpha_i, diff_i_y, diff_j_y;
+	int true_i, true_j, true_k, act_set_i, act_set_j, act_set_k;
+
+	while(iter<1e7) 
+	{
+		int i,j,k,set_type,r;
+
+		if(--counter == 0) 
+		{
+			counter = min(l,1000);
+			if(shrinking) 
+				do_shrinking_plus();
+		}
+
+		if(select_working_set_plus(set_type, i,j,k, iter) != 0) 
+		{
+			// reconstruct the whole gradient
+			reconstruct_gradient_plus();
+			// reset active set size and check
+			active_size = l;
+			active_size_beta = l;
+			
+			if(select_working_set_plus(set_type, i,j,k, iter) != 0)
+				break;
+			else
+				counter = 1;	// do shrinking next iteration
+		}
+
+		++iter;
+
+		switch(set_type)
+		{
+			case BETA_I_BETA_J: 
+				Q_i_star_beta = Q_star_beta.get_Q(i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(j,active_size_beta);
+				beta_i_old = beta[i];
+				beta_j_old = beta[j];
+				Delta = beta_i_old + beta_j_old;
+				beta[i] += (g_beta[j]-g_beta[i])/(Q_i_star_beta[i]+Q_j_star_beta[j]-2*Q_i_star_beta[j]);
+				beta_i = beta[i];
+				if (beta_i < 0)
+					beta[i] = 0;
+				if (beta_i > Delta)
+					beta[i] = Delta;
+					beta[j] = Delta - beta[i];
+
+				diff_i = beta[i]-beta_i_old;
+				diff_j = beta[j]-beta_j_old;
+				for(r=0; r<active_size_beta; r++) 
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]; 
+				
+				update_beta_status(i);
+				update_beta_status(j);
+				break;
+
+			case ALPHA_I_ALPHA_J:
+				Q_i = Q.get_Q(i,active_size);
+				Q_j = Q.get_Q(j,active_size);
+				Q_i_star = Q_star.get_Q(i,active_size);
+				Q_j_star = Q_star.get_Q(j,active_size);
+				alpha_i_old = alpha[i];
+				alpha_j_old = alpha[j];
+				y_i = y[i];
+				y_j = y[j];
+				Delta = alpha_i_old + alpha_j_old;
+				nominator = y_j*G[j]-y_i*G[i]+(g[j]-g[i])/tau;
+				denominator = Q_i[i]+Q_j[j]-2*Q_i[j]+(Q_i_star[i]+Q_j_star[j]-2*Q_i_star[j])/tau;
+				alpha[i] += nominator/denominator;
+				alpha_i = alpha[i];
+				if (alpha_i < 0)
+					alpha[i] = 0;
+				if (alpha_i > Delta)
+					alpha[i] = Delta;
+				alpha[j] = Delta - alpha[i];
+
+				diff_i = alpha[i]-alpha_i_old;
+				diff_j = alpha[j]-alpha_j_old;
+				diff_i_y = diff_i * y_i;
+				diff_j_y = diff_j * y_j;      
+				for (r=0; r<active_size; r++) 
+				{
+					G[r] += diff_i_y*Q_i[r]+diff_j_y*Q_j[r];
+					g[r] += diff_i*Q_i_star[r]+diff_j*Q_j_star[r]; 
+				}
+
+				true_i = active_set[i];
+				act_set_i = true_act_set_beta[true_i];
+				true_j = active_set[j];
+				act_set_j = true_act_set_beta[true_j];
+				Q_i_star_beta = Q_star_beta.get_Q(act_set_i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(act_set_j,active_size_beta);
+
+				for (r=0; r<active_size_beta; r++) 
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]; 
+
+				update_alpha_status(i);
+				update_alpha_status(j);
+				break;
+
+			case ALPHA_I_ALPHA_J_BETA_K:
+				Q_i = Q.get_Q(i,active_size);
+				Q_j = Q.get_Q(j,active_size);
+				Q_i_star = Q_star.get_Q(i,active_size);
+				Q_j_star = Q_star.get_Q(j,active_size);
+				Q_k_star_beta = Q_star_beta.get_Q(k,active_size_beta);
+
+				true_k = active_set_beta[k];
+				act_set_k = true_act_set[true_k];
+				Q_k_star = Q_star.get_Q(act_set_k, active_size);
+
+				alpha_i_old = alpha[i];
+				alpha_j_old = alpha[j];
+				beta_k_old = beta[k];
+				y_i = y[i];
+				y_j = y[j];
+				if(alpha_i_old < alpha_j_old)
+					min_alpha = alpha_i_old;
+				else
+					min_alpha = alpha_j_old;
+
+				Delta = beta_k_old + 2*min_alpha;
+				nominator = y[i]*G[i]+y[j]*G[j]-2+(g[i]+g[j]-2*g_beta[k])/tau;
+				denominator = Q_i[i]+Q_j[j]-2*Q_i[j]+(Q_i_star[i]+Q_j_star[j]+2*Q_i_star[j]-4*Q_k_star[i]-4*Q_k_star[j]+4*Q_k_star_beta[k])/tau;
+				beta[k] += 2*nominator/denominator;
+				beta_k = beta[k];
+				if (beta_k < 0)
+					beta[k] = 0;
+				if (beta_k > Delta)
+					beta[k] = Delta;
+				alpha_change = (beta_k_old-beta[k])/2;
+				alpha[i] += alpha_change;
+				alpha[j] += alpha_change;
+
+				diff_i = alpha[i]-alpha_i_old;
+				diff_j = alpha[j]-alpha_j_old;
+				diff_k = beta[k]-beta_k_old;
+				diff_i_y = diff_i * y_i;
+				diff_j_y = diff_j * y_j;
+
+				for (r=0; r<active_size; r++) 
+				{
+					G[r] += diff_i_y*Q_i[r]+diff_j_y*Q_j[r];
+					g[r] += diff_i*Q_i_star[r]+diff_j*Q_j_star[r]+diff_k*Q_k_star[r]; 
+				}
+
+				true_i = active_set[i];
+				act_set_i = true_act_set_beta[true_i];
+				true_j = active_set[j];
+				act_set_j = true_act_set_beta[true_j];
+				Q_i_star_beta = Q_star_beta.get_Q(act_set_i,active_size_beta);
+				Q_j_star_beta = Q_star_beta.get_Q(act_set_j,active_size_beta);
+
+				for(r=0; r<active_size_beta; r++)
+					g_beta[r] += diff_i*Q_i_star_beta[r]+diff_j*Q_j_star_beta[r]+diff_k*Q_k_star_beta[r];
+
+				update_alpha_status(i);
+				update_alpha_status(j);
+				update_beta_status(k);
+					
+				break;
+		}
+	}
+
+	calculate_rho_plus(si->rho,si->rho_star);
+
+	// put back the solution
+	for(i=0;i<l;i++) {
+		alpha_[active_set[i]] = alpha[i];
+		beta_[active_set_beta[i]] = beta[i];
+	}
+		
+	si->upper_bound_p = Cp;
+	si->upper_bound_n = Cn;
+
+	info("\noptimization finished, #iter = %d\n",iter);
+
+	si->rho *= -1;
+
+	delete[] G;
+	delete[] g;
+	delete[] g_init;
+	delete[] g_beta;
+	delete[] g_beta_init;
+	delete[] alpha_status;
+	delete[] beta_status;
+	delete[] alpha;
+	delete[] beta;
+
+
+}
+
+void Solver::Solve_plus_tl(int l, const QMatrix& Q, const QMatrix& Q_star, const QMatrix& Q_star_beta, const schar *y_,
+			     double *alpha_, double *beta_, double Cp, double Cn, double tau_, double eps,
+			     SolutionInfo* si, int shrinking, svm_model *model)
+{
+	int i,j;
+	this->l = l;
+	this->Q = &Q;
+	this->Q_star = &Q_star;
+	this->Q_star_beta = &Q_star_beta;
+	QD = Q.get_QD();
+	QD_star = Q_star.get_QD();
+	QD_star_beta = Q_star_beta.get_QD();	
+	clone(y, y_,l);
+	clone(alpha,alpha_,l);
+	clone(beta,beta_,l);
+	this->Cp = Cp;
+	this->Cn = Cn;
+	this->eps = eps;
+	tau = tau_;
+	unshrink = false;
+
+	{
+		alpha_status = new char[l];
+		for(i=0;i<l;i++)
+			update_alpha_status(i);
+	}
+
+	{
+		beta_status = new char[l];
+		for(i=0;i<l;i++)
+			update_beta_status(i);
+	}
+
+	{
+		// initialize gradient
+		G = new double[l];
+		G_w = new double[l];
 		g = new double[l];
 		g_beta = new double[l];
 		g_init = new double[l];
@@ -2720,8 +3018,6 @@ static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
 	cheat_problem.x = Malloc(struct svm_node*,prob->l);
 	memcpy(cheat_problem.x, prob->x_star, l*sizeof(struct svm_node*));
 
-
-
 	cheat_param2 = *param;
 	cheat_param2.kernel_type = 2;
 	cheat_param2.gamma = param->gamma_star;
@@ -2746,8 +3042,78 @@ static void solve_svm_plus(const svm_problem *prob, const svm_parameter* param,
 
 	delete[] y;
 	delete[] y_true;
+	
 }
 
+static void solve_svm_plus_tl(const svm_problem *prob, const svm_parameter* param,
+			   double *alpha, double *beta, Solver::SolutionInfo* si, double Cp, double Cn)
+{
+	int l = prob->l;
+	schar *y = new schar[l];
+	schar *y_true = new schar[l];
+	svm_parameter cheat_param, cheat_param2; 
+	svm_problem cheat_problem, cheat_problem2;
+	int i;
+	int l_pos=0, l_neg=0;
+
+	struct svm_model* model;
+	if((model=svm_load_model(param->transfer_file_name))==0)
+	{
+		fprintf(stderr,"can't open model file %s\n",param->transfer_file_name);
+		exit(1);
+	}
+
+	// initialize alphas and betas
+	for(i=0;i<l;i++) 
+	{
+		alpha[i] = 0;
+		beta[i] = Cp; 
+		y[i] = 1;
+		if(prob->y[i] > 0) 
+		{ 
+			y_true[i] = +1; 
+			l_pos++;
+		}
+		else 
+		{
+			y_true[i]=-1;
+			l_neg++;
+		}
+	}
+
+	cheat_param = *param;
+	cheat_param.kernel_type = 2;
+	cheat_param.gamma = param->gamma_star;
+	cheat_problem = *prob;
+	cheat_problem.x = Malloc(struct svm_node*,prob->l);
+	memcpy(cheat_problem.x, prob->x_star, l*sizeof(struct svm_node*));
+
+	cheat_param2 = *param;
+	cheat_param2.kernel_type = 2;
+	cheat_param2.gamma = param->gamma_star;
+	cheat_problem2 = *prob;
+	cheat_problem2.x = Malloc(struct svm_node*,prob->l);
+	memcpy(cheat_problem2.x, prob->x_star, l*sizeof(struct svm_node*));
+
+	SVC_Q kernel1 = SVC_Q(*prob,*param,y);
+	SVC_Q kernel2 = SVC_Q(cheat_problem, cheat_param, y);
+	SVC_Q kernel3 = SVC_Q(cheat_problem2, cheat_param2, y);
+	Solver s;
+	
+    s.Solve_plus_tl(l, kernel1, kernel2, kernel3, y_true,
+		 alpha, beta, Cp, Cn, param->tau, param->eps, si, param->shrinking, model);
+
+	// produce the same output as SVM
+	for(i=0;i<l;i++) { 
+		if(alpha[i]<0)
+			alpha[i] = 0;
+		alpha[i] *= y_true[i];
+	}
+
+	delete[] y;
+	delete[] y_true;
+	
+}
 
 static void solve_nu_svc(
 	const svm_problem *prob, const svm_parameter *param,
@@ -2929,7 +3295,7 @@ static decision_function svm_train_one(
 {
 	double *alpha = Malloc(double,prob->l);
 	double *beta = NULL;
-	if(param->svm_type == SVM_PLUS)
+	if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		beta = Malloc(double,prob->l);
 
 	Solver::SolutionInfo si;
@@ -2956,6 +3322,9 @@ static decision_function svm_train_one(
 		case SVM_PLUS:
 			solve_svm_plus(prob,param,alpha,beta,&si,Cp,Cn);
 			break;
+		case SVM_PLUS_TL:
+			solve_svm_plus_tl(prob,param,alpha,beta,&si,Cp,Cn);
+			break;
 	}
 
 	info("obj = %f, rho = %f\n",si.obj,si.rho);
@@ -2972,7 +3341,7 @@ static decision_function svm_train_one(
 		if(fabs(alpha[i]) > 0)
 		{
 			++nSV;
-			if (param->svm_type != SVM_PLUS) 
+			if (param->svm_type != SVM_PLUS && param->svm_type != SVM_PLUS_TL) 
 			{	
 				if(prob->y[i] > 0)
 				{
@@ -2986,7 +3355,7 @@ static decision_function svm_train_one(
 				}
 			}
 		}
-		if (param->svm_type == SVM_PLUS)
+		if (param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		{
 			if(fabs(beta[i]) > 0)
 				++nSV_star;
@@ -2994,14 +3363,14 @@ static decision_function svm_train_one(
 	}
 
 	info("nSV = %d, nBSV = %d\n",nSV,nBSV);
-	if (param->svm_type == SVM_PLUS)
+	if (param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		info("nSV_star = %d nBSV_star = %d \n",nSV_star,nBSV_star);
 	
 	decision_function f;
 	f.alpha = alpha;
 	f.rho = si.rho;
 	
-	if (param->svm_type == SVM_PLUS) 
+	if (param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL) 
 	{
 		f.beta = beta;
 		f.rho_star = si.rho_star;
@@ -3551,7 +3920,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		svm_group_classes(prob,&nr_class,&label,&start,&count,perm);
 		if(nr_class == 1)
 			info("WARNING: training data in only one class. See README for details.\n");
-
+		
 		svm_node **x = Malloc(svm_node *,l);
 		svm_node **x_star = NULL;
 		int i;
@@ -3562,7 +3931,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 			// std::cout << x[i]->value << std::endl;
 		}
 
-		if(param->svm_type == SVM_PLUS)
+		if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		{
 			x_star = Malloc(svm_node *,l);
 			for(i=0;i<l;i++)
@@ -3586,7 +3955,6 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		}
 
 		// train k*(k-1)/2 models
-		
 		bool *nonzero = Malloc(bool,l);
 		bool *nonzero_star = Malloc(bool,l);
 		for(i=0;i<l;i++) 
@@ -3603,7 +3971,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 			probA=Malloc(double,nr_class*(nr_class-1)/2);
 			probB=Malloc(double,nr_class*(nr_class-1)/2);
 		}
-
+		
 		int p = 0, p_star = 0;
 		for(i=0;i<nr_class;i++)
 			for(int j=i+1;j<nr_class;j++)
@@ -3614,21 +3982,21 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				sub_prob.l = ci+cj;
 				sub_prob.x = Malloc(svm_node *,sub_prob.l);
 				sub_prob.y = Malloc(double,sub_prob.l);
-				if(param->svm_type == SVM_PLUS)
+				if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 					sub_prob.x_star = Malloc(svm_node *,sub_prob.l);    				
 				int k;
 				for(k=0;k<ci;k++)
 				{
 					sub_prob.x[k] = x[si+k];
 					sub_prob.y[k] = +1;
-					if(param->svm_type == SVM_PLUS)
+					if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		  				sub_prob.x_star[k] = x_star[si+k];
 				}
 				for(k=0;k<cj;k++)
 				{
 					sub_prob.x[ci+k] = x[sj+k];
 					sub_prob.y[ci+k] = -1;
-					if(param->svm_type == SVM_PLUS)
+					if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 		  				sub_prob.x_star[ci+k] = x_star[sj+k];					
 				}
 
@@ -3636,12 +4004,12 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 					svm_binary_svc_probability(&sub_prob,param,weighted_C[i],weighted_C[j],probA[p],probB[p]);
 				
 				f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
-
+				
 				for(k=0;k<ci;k++) 
 				{
 					if(!nonzero[si+k] && fabs(f[p].alpha[k]) > 0)
 						nonzero[si+k] = true;
-					if(param->svm_type == SVM_PLUS) 
+					if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL) 
 					{
 						if(!nonzero_star[si+k] && f[p].beta[k] > 0) 
 							nonzero_star[si+k] = true;
@@ -3651,14 +4019,14 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				{
 					if(!nonzero[sj+k] && fabs(f[p].alpha[ci+k]) > 0)
 						nonzero[sj+k] = true;
-					if(param->svm_type == SVM_PLUS)
+					if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 					{
 						if(!nonzero_star[sj+k] && f[p].beta[ci+k] > 0) 
 		  					nonzero_star[sj+k] = true;
 					}
 				}
 				free(sub_prob.x);
-				if(param->svm_type == SVM_PLUS)
+				if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL)
 	      			free(sub_prob.x_star);
 				free(sub_prob.y);
 				++p;
@@ -3676,7 +4044,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		for(i=0;i<nr_class*(nr_class-1)/2;i++)
 			model->rho[i] = f[i].rho;
 
-    	if(param->svm_type == SVM_PLUS) 
+    	if(param->svm_type == SVM_PLUS || param->svm_type == SVM_PLUS_TL) 
 		{
 			model->rho_star = Malloc(double,nr_class*(nr_class-1)/2);
 			for(i=0;i<nr_class*(nr_class-1)/2;i++)
@@ -3744,7 +4112,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				model->sv_indices[p++] = perm[i] + 1;
 			}
 		
-		if(model->param.svm_type == SVM_PLUS)
+		if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 			{
 				model->SV_star = Malloc(svm_node *,total_sv_star);
 				model->sv_indices_star = Malloc(int,total_sv_star);
@@ -3768,7 +4136,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 
 		int *nz_start_star=NULL;
 
-		if(model->param.svm_type == SVM_PLUS)
+		if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 		{
 			nz_start_star = Malloc(int,nr_class);
 			nz_start_star[0] = 0;
@@ -3795,25 +4163,25 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				int q = nz_start[i];
 				int k;
 				int q_star = 0;
-				if(model->param.svm_type == SVM_PLUS)
+				if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 					q_star = nz_start_star[i];
 
 				for(k=0;k<ci;k++)
 				{
 					if(nonzero[si+k])
 						model->sv_coef[j-1][q++] = f[p].alpha[k];
-					if(model->param.svm_type == SVM_PLUS)
+					if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 						if(nonzero_star[si+k])
 							model->sv_coef_star[j-1][q_star++] = f[p].beta[k];
 				}
 
 				q = nz_start[j];
-				if(model->param.svm_type == SVM_PLUS)
+				if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 					q_star = nz_start_star[j];
 				for(k=0;k<cj;k++)
 					if(nonzero[sj+k])
 						model->sv_coef[i][q++] = f[p].alpha[ci+k];
-					if(model->param.svm_type == SVM_PLUS)
+					if(model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 						if(nonzero_star[sj+k])
 							model->sv_coef_star[i][q_star++] = f[p].beta[ci+k];
 				++p;
@@ -3832,7 +4200,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 			free(f[i].alpha);
 		free(nz_count);
 		free(nz_start);
-		if (model->param.svm_type == SVM_PLUS)
+		if (model->param.svm_type == SVM_PLUS || model->param.svm_type == SVM_PLUS_TL)
 		{
 			free(nz_count_star);
 			free(nz_start_star);
@@ -4253,7 +4621,7 @@ double svm_predict_probability(
 
 static const char *svm_type_table[] =
 {
-	"c_svc","nu_svc","one_class","epsilon_svr","nu_svr","w_svm",NULL
+	"c_svc","nu_svc","one_class","epsilon_svr","nu_svr","w_svm", "svm_plus", "svm_plus_tl", NULL
 };
 
 static const char *kernel_type_table[]=
@@ -4277,7 +4645,7 @@ int svm_save_model(const char *model_file_name, const svm_model *model)
 	fprintf(fp,"svm_type %s\n", svm_type_table[param.svm_type]);
 	fprintf(fp,"kernel_type %s\n", kernel_type_table[param.kernel_type]);
 
-	if(param.svm_type == W_SVM)
+	if(param.svm_type == W_SVM || param.svm_type == SVM_PLUS_TL)
 		fprintf(fp,"t_model %s\n", param.transfer_file_name);
 
 	if(param.kernel_type == POLY)
@@ -4698,7 +5066,8 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 	   svm_type != EPSILON_SVR &&
 	   svm_type != NU_SVR && 
 	   svm_type != W_SVM &&
-	   svm_type != SVM_PLUS)
+	   svm_type != SVM_PLUS &&
+	   svm_type != SVM_PLUS_TL) 
 		return "unknown svm type";
 
 	// kernel_type, degree
@@ -4728,6 +5097,7 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 
 	if(svm_type == C_SVC ||
 	   svm_type == SVM_PLUS ||
+	   svm_type == SVM_PLUS_TL ||
 	   svm_type == EPSILON_SVR ||
 	   svm_type == NU_SVR)
 		if(param->C <= 0)
@@ -4739,7 +5109,7 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 		if(param->nu <= 0 || param->nu > 1)
 			return "nu <= 0 or nu > 1";
 
-	if(svm_type == SVM_PLUS)
+	if(svm_type == SVM_PLUS || svm_type == SVM_PLUS_TL)
 		if(param->tau <= 0)
 			return "tau <= 0";
 
